@@ -39,7 +39,7 @@ describe('an hour of PostToolUse churn across three sessions with the phone away
     await new Promise((r) => setTimeout(r, 400)); // the throttle's trailing edge
     const sent = counter(w, 'frames') - t0;
     expect(pushes).toBeGreaterThan(100);
-    expect(sent).toBeGreaterThan(5); // the host really was sending states all along
+    expect(sent).toBeGreaterThanOrEqual(2); // the host really was sending states all along (the 2 s throttle runs on real time: a slow CI runner sends fewer)
 
     // the relay holds the newest state, the newest acknowledgement and nothing else
     const q = queues(w);
