@@ -6,7 +6,7 @@
  */
 import { createHash, generateKeyPairSync, type KeyObject } from 'node:crypto';
 import { spawn, spawnSync } from 'node:child_process';
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { createServer, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { tmpdir } from 'node:os';
@@ -33,6 +33,9 @@ const keyPair = (): { pem: string; spki: string; priv: KeyObject } => {
   return { pem: privateKey.export({ type: 'pkcs8', format: 'pem' }).toString(), spki: publicKey.export({ type: 'spki', format: 'der' }).toString('base64'), priv: privateKey };
 };
 const KEY = keyPair(); const OTHER = keyPair();
+const WIN = process.platform === 'win32';
+/** the command name the installer writes on this platform */
+const SHIM = WIN ? 'botwarren-companion.cmd' : 'botwarren-companion';
 const pinned = [{ id: 'test-comp', spki: KEY.spki, dev: false }];
 
 const companionSource = (version: string): string => `if (process.argv[2] === 'version') process.stdout.write('${version}\\n'); else { process.stdout.write('ran ' + process.argv.slice(2).join(' ') + '\\n'); }\n`;
@@ -95,7 +98,7 @@ describe('manual install: the happy path', () => {
     expect(readdirSync(w.dir).sort()).toEqual(['install.json', 'state.json', 'versions']); // the staging directory is gone
     expect(w.logs.join('\n')).toMatch(/signature OK \(key test-comp\)/);
     if (process.platform !== 'win32') {
-      const shim = join(w.bin, 'botwarren-companion');
+      const shim = join(w.bin, SHIM);
       expect(readFileSync(shim, 'utf8')).toContain(SHIM_MARKER);
       const out = spawnSync(shim, ['version'], { encoding: 'utf8' });
       expect(out.stdout.trim()).toBe('0.1.1');
@@ -244,10 +247,10 @@ describe('manual install: command, service and uninstall', () => {
   it('never overwrites or removes a botwarren-companion it did not write (a foreign file, or the ship agent\'s launcher)', async () => {
     for (const [content, tag] of [['#!/bin/sh\necho mine\n', 'foreign'], ['#!/bin/sh\n# botwarren-companion shim (ship agent): x\n', 'agent']] as const) {
       const w = world(fixture());
-      mkdirSync(w.bin, { recursive: true }); writeFileSync(join(w.bin, 'botwarren-companion'), content);
+      mkdirSync(w.bin, { recursive: true }); writeFileSync(join(w.bin, SHIM), content);
       const r = await install(w.opts);
       expect(r, tag).toMatchObject({ status: 'installed', shim: 'kept' });
-      expect(readFileSync(join(w.bin, 'botwarren-companion'), 'utf8')).toBe(content);
+      expect(readFileSync(join(w.bin, SHIM), 'utf8')).toBe(content);
       expect(w.logs.join('\n')).toContain('not changing');
     }
   });
@@ -267,7 +270,8 @@ describe('manual install: command, service and uninstall', () => {
     w.opts.runService = (cmd: string, args: string[]) => { calls.push([cmd, ...args].join(' ')); return true; };
     const r = await install(w.opts);
     const sp = servicePaths({ os: process.platform, home: w.opts.home, env: w.opts.env });
-    expect(r.service).toMatchObject({ file: sp.file, started: true });
+    // the Windows Startup-folder launcher runs at the next sign-in, it is not started now
+    expect(r.service).toMatchObject({ file: sp.file, started: !WIN });
     expect(existsSync(sp.file)).toBe(true);
     const text = readFileSync(sp.file, 'utf8');
     expect(text).toContain('companion.mjs');
@@ -281,7 +285,7 @@ describe('manual install: command, service and uninstall', () => {
     const u = { dir: w.dir, bin: w.bin, os: process.platform, home: w.opts.home, env: w.opts.env, log: (m: string) => w.logs.push(m), runService: w.opts.runService, runCompanion: (a: string[]) => { companionCalls.push(a); return true; } };
     expect(uninstall(u)).toEqual({ status: 'removed' });
     expect(companionCalls).toEqual([['uninstall', '--purge', '--yes']]);
-    expect(existsSync(sp.file)).toBe(false); expect(existsSync(w.dir)).toBe(false); expect(existsSync(join(w.bin, 'botwarren-companion'))).toBe(false);
+    expect(existsSync(sp.file)).toBe(false); expect(existsSync(w.dir)).toBe(false); expect(existsSync(join(w.bin, SHIM))).toBe(false);
     expect(uninstall({ ...u })).toEqual({ status: 'none' });
     const keep: string[][] = [];
     const w3 = world(fixture()); await install(w3.opts);
@@ -299,12 +303,12 @@ describe('manual install: command, service and uninstall', () => {
     const vbs = serviceText('startup', 'C:\\n\\node.exe', 'C:\\a\\companion.mjs', 'x');
     expect(vbs).toContain('WScript.Shell'); expect(vbs).toContain('daemon", 0, False');
     expect(servicePaths({ os: 'win32', home: 'C:\\Users\\a', env: { APPDATA: 'C:\\Users\\a\\AppData\\Roaming' } }).file).toContain('Startup');
-    expect(servicePaths({ os: 'darwin', home: '/Users/a', env: {} }).file).toBe('/Users/a/Library/LaunchAgents/com.botwarren.companion.plist');
-    expect(servicePaths({ os: 'linux', home: '/home/a', env: {} }).file).toBe('/home/a/.config/systemd/user/botwarren-companion.service');
+    expect(servicePaths({ os: 'darwin', home: '/Users/a', env: {} }).file).toBe(join('/Users/a', 'Library', 'LaunchAgents', 'com.botwarren.companion.plist'));
+    expect(servicePaths({ os: 'linux', home: '/home/a', env: {} }).file).toBe(join('/home/a', '.config', 'systemd', 'user', 'botwarren-companion.service'));
   });
 
   it('default locations are per user (Linux and macOS ~/.local, Windows %LOCALAPPDATA%\\Botwarren), and the options are strict', () => {
-    expect(defaultPaths({ os: 'linux', home: '/home/a', env: {} })).toMatchObject({ dir: '/home/a/.local/share/botwarren-companion', bin: '/home/a/.local/bin' });
+    expect(defaultPaths({ os: 'linux', home: '/home/a', env: {} })).toMatchObject({ dir: join('/home/a', '.local', 'share', 'botwarren-companion'), bin: join('/home/a', '.local', 'bin') });
     expect(defaultPaths({ os: 'win32', home: 'C:\\Users\\a', env: { LOCALAPPDATA: 'C:\\L' } })).toMatchObject({ dir: join('C:\\L', 'Botwarren', 'companion'), bin: join('C:\\L', 'Botwarren', 'bin') });
     expect(parseArgs(['--service', '--dry-run', '--base-url', 'https://x.test'], {})).toMatchObject({ service: true, dryRun: true, base: 'https://x.test' });
     expect(() => parseArgs(['--nope'], {})).toThrow(/unknown option/);
@@ -427,6 +431,14 @@ describe.skipIf(process.platform === 'win32')('install.sh against a locally serv
     // and without the test switch, the dev key is refused outright
     const r3 = await run(join(root, 'install', 'install.sh'), ['--base-url', base2], mk(), { BOTWARREN_COMPANION_ALLOW_DEV_KEY: '0' });
     expect(r3.code).toBe(1);
+  });
+
+  it('runs when the temporary directory is reached through a symlink (macOS: /var is /private/var)', async () => {
+    const d = mk(); mkdirSync(join(d, 'real')); symlinkSync(join(d, 'real'), join(d, 'link'));
+    const h = await run(join(root, 'install', 'install.sh'), ['--help'], d, { TMPDIR: join(d, 'link') });
+    expect(h.code).toBe(0); expect(h.out).toContain('--service');
+    const bad = await run(join(root, 'install', 'install.sh'), ['--base-url', 'http://downloads.botwarren.com'], d, { TMPDIR: join(d, 'link') });
+    expect(bad.code).toBe(1); expect(bad.err).toMatch(/insecure_url/);
   });
 
   it('refuses plain http to a real host and says --help without installing anything', async () => {

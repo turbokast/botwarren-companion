@@ -25,7 +25,7 @@
  */
 import { createHash, createPublicKey, verify as edVerify } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
-import { chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { homedir, platform } from 'node:os';
 import { dirname, join } from 'node:path';
 import { pathToFileURL } from 'node:url';
@@ -447,4 +447,6 @@ export async function main(argv, env = process.env) {
   }
 }
 
-if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) process.exitCode = await main(process.argv.slice(2));
+// Node resolves symlinks in the main module's URL (macOS: the temporary directory /var is /private/var), so compare against the resolved path
+const isMain = (() => { try { return Boolean(process.argv[1]) && import.meta.url === pathToFileURL(realpathSync(process.argv[1])).href; } catch { return false; } })();
+if (isMain) process.exitCode = await main(process.argv.slice(2));
