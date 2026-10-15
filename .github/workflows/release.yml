@@ -1,0 +1,448 @@
+name: Release
+
+# Publishes a release when a `v*` tag is pushed. See docs/RELEASING.md for the full procedure and the one-time setup.
+#
+# A release is three things, all signed with the Botwarren COMPONENT signing key (the non-exportable Cloud KMS key `component-signing`, pinned as `kms-comp-2026a`;
+# it is a DIFFERENT key from the one that signs the ship agent's updates, and a different service account, `companion-signer`): the SIGNED WEB CLIENT (served by the relay), the SIGNED COMPONENT (the zip the ship agent installs after the user
+# consents) and the RELAY IMAGE INPUTS (a tar.gz that holds the signed client and everything `docker build` needs). There is no unsigned mode: if
+# signing is not switched on, the release fails closed.
+#
+#   build        no secrets, read-only token: typecheck, tests, then the client and the component, built with a fixed SOURCE_DATE_EPOCH (the commit time).
+#   reproduce    no secrets: a second, independent build; its SHA256SUMS must equal the first one.
+#   sign         PROTECTED `release` environment (required reviewer). Authenticates to Google Cloud with GitHub OIDC workload identity federation (NO key
+#                file, NO stored credential), signs the client manifest and the component manifest with Cloud KMS, packages the relay image inputs,
+#                and verifies everything against the PINNED public key (scripts/verify-release.mjs) before uploading it as a workflow artifact.
+#                Google only lets this exact repository, workflow file, tag and environment use the key (docs/RELEASING.md).
+#   relay-image  no secrets: builds the relay image from the signed relay image inputs and smoke-tests it, so what the operator deploys is known to work.
+#   publish      PROTECTED `release` environment (a second approval): attests the files (GitHub artifact attestations), uploads them to Cloudflare R2
+#                (`companion/` in the bucket `botwarren-downloads`, the component manifest LAST) and creates the GitHub Release from the CHANGELOG entry.
+#
+# Every job that uses a file from an earlier job downloads it explicitly (the sign and publish jobs each download `release-files`/`signed-release` AND
+# `release-notes`) and a guard step fails the job if a file it needs is missing, so a forgotten download fails early and loudly.
+#
+# Repository variables (not secrets: they only name public resources; Google enforces who may use them):
+#   RELEASE_SIGNING                 must be `kms` (the release fails closed otherwise)
+#   GCP_WORKLOAD_IDENTITY_PROVIDER  projects/881108236417/locations/global/workloadIdentityPools/github-release/providers/botwarren-companion
+#   GCP_SERVICE_ACCOUNT             companion-signer@botwarren-release.iam.gserviceaccount.com
+#   RELEASE_EPOCH                   optional; the trust epoch (default 1), raised by the owner only after a recovery key ceremony (the same epoch as the agent's)
+#
+# Every action is pinned to a full commit SHA (the tag is in the trailing comment). Update them through Dependabot.
+#
+# Secrets (all stored ONLY in the `release` environment, never as repository secrets):
+#   R2_ACCESS_KEY_ID, R2_SECRET_ACCESS_KEY   an R2 API token scoped to the bucket `botwarren-downloads` (object read and write)
+#   R2_ENDPOINT                              https://<cloudflare-account-id>.r2.cloudflarestorage.com
+
+on:
+  push:
+    tags: ['v*']
+
+permissions: {}
+
+concurrency:
+  group: release-${{ github.ref_name }}
+  cancel-in-progress: false
+
+env:
+  R2_BUCKET: botwarren-downloads
+  NODE_VERSION: '24'
+  DOWNLOADS_URL: https://downloads.botwarren.com
+  KMS_KEY_VERSION: projects/botwarren-release/locations/europe-west2/keyRings/botwarren-release/cryptoKeys/component-signing/cryptoKeyVersions/1
+  KMS_KEY_ID: kms-comp-2026a
+
+jobs:
+  build:
+    name: build client and component
+    if: github.repository == 'turbokast/botwarren-companion'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - name: Check out the tag
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Check that the tag matches the versions in the tree and is on main
+        id: version
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          version=$(node -p "require('./package.json').version")
+          if [ "v${version}" != "${TAG}" ]; then
+            echo "::error::tag ${TAG} does not match package.json version ${version}"; exit 1
+          fi
+          for f in apps/companion/package.json apps/relay/package.json; do
+            [ "$(node -p "require('./${f}').version")" = "${version}" ] || { echo "::error::${f} is not ${version}"; exit 1; }
+          done
+          grep -q "VERSION = '${version}'" apps/companion/src/commands.ts || { echo "::error::apps/companion/src/commands.ts is not ${version}"; exit 1; }
+          git fetch --no-tags origin main
+          git merge-base --is-ancestor "${GITHUB_SHA}" origin/main || { echo "::error::tag ${TAG} is not on main"; exit 1; }
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
+
+      - name: Set up Node.js
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          package-manager-cache: false   # release jobs never use a build cache (cache poisoning)
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      # The public key of the component-signing KMS key is pinned in apps/companion/vendor/agent/src/update/keys.ts. While that value is still the
+      # PLACEHOLDER nothing can be signed (and a loader pinning it would trust nothing), so a release fails here, before any build or approval.
+      - name: Check that the real component public key is pinned (not the placeholder)
+        run: |
+          set -euo pipefail
+          node --disable-warning=ExperimentalWarning --input-type=module -e "
+            const { COMPONENT_KEY_IS_PLACEHOLDER, COMPONENT_PUBLIC_KEYS } = await import('./apps/companion/vendor/agent/src/update/keys.ts');
+            const k = COMPONENT_PUBLIC_KEYS.find((x) => x.id === process.env.KMS_KEY_ID);
+            if (!k || k.dev || COMPONENT_KEY_IS_PLACEHOLDER || k.placeholder) { console.error('::error::the component public key ' + process.env.KMS_KEY_ID + ' is not pinned yet (placeholder): paste the real public key of the component-signing KMS key and re-vendor'); process.exit(1); }
+            console.log('pinned component key ' + k.id + ' ' + k.spki);
+          "
+
+      - name: Typecheck
+        run: pnpm typecheck
+
+      - name: Test
+        run: pnpm test
+
+      # The GitHub Release body is the reviewed CHANGELOG.md entry for this version. A missing, undated or empty entry fails the build, before
+      # anything is published.
+      - name: Extract the release notes from CHANGELOG.md
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          mkdir -p dist/notes
+          node apps/companion/scripts/changelog-notes.mjs "${VERSION}" --out dist/notes/RELEASE_NOTES.md
+          { echo '### Release notes'; echo; cat dist/notes/RELEASE_NOTES.md; } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload the release notes
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: release-notes
+          path: dist/notes/RELEASE_NOTES.md
+          if-no-files-found: error
+          retention-days: 7
+
+      # Same source and the same SOURCE_DATE_EPOCH (the commit time) give the same bytes: that is what the independent rebuild checks.
+      - name: Build the web client and the component (unsigned)
+        run: |
+          set -euo pipefail
+          SOURCE_DATE_EPOCH="$(git log -1 --format=%ct "${GITHUB_SHA}")"
+          export SOURCE_DATE_EPOCH
+          export GIT_COMMIT="${GITHUB_SHA}"
+          node --disable-warning=ExperimentalWarning apps/companion/client/scripts/build.mjs --out dist/release/client
+          node --disable-warning=ExperimentalWarning apps/companion/scripts/build-component.mjs --out dist/release/component
+          (cd dist/release && find . -type f | LC_ALL=C sort | xargs sha256sum > ../SHA256SUMS)
+          mv dist/SHA256SUMS dist/release/SHA256SUMS
+          { echo '### Build output (unsigned)'; echo '```'; cat dist/release/SHA256SUMS; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload the build output
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: release-files
+          path: dist/release/
+          if-no-files-found: error
+          retention-days: 7
+
+  reproduce:
+    name: independent rebuild
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      - name: Check out the tag
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
+
+      - name: Set up Node.js
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          package-manager-cache: false   # release jobs never use a build cache (cache poisoning)
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      # the same SOURCE_DATE_EPOCH as the build job: the committer time of the tagged commit (the shallow checkout has that commit)
+      - name: Rebuild
+        run: |
+          set -euo pipefail
+          SOURCE_DATE_EPOCH="$(git log -1 --format=%ct "${GITHUB_SHA}")"
+          export SOURCE_DATE_EPOCH
+          export GIT_COMMIT="${GITHUB_SHA}"
+          node --disable-warning=ExperimentalWarning apps/companion/client/scripts/build.mjs --out dist/rebuild/client
+          node --disable-warning=ExperimentalWarning apps/companion/scripts/build-component.mjs --out dist/rebuild/component
+          (cd dist/rebuild && find . -type f | LC_ALL=C sort | xargs sha256sum > ../SHA256SUMS)
+          mv dist/SHA256SUMS dist/rebuild/SHA256SUMS
+
+      - name: Download the first build
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: release-files
+          path: first
+
+      - name: Compare
+        run: |
+          set -euo pipefail
+          if ! diff -u first/SHA256SUMS dist/rebuild/SHA256SUMS; then
+            echo "::error::the two builds differ: the release is not reproducible, refusing to publish"; exit 1
+          fi
+          # the first build's files must also be the ones its SHA256SUMS describe
+          (cd first && sha256sum --check --quiet SHA256SUMS)
+          echo "the independent rebuild produced identical hashes"
+
+  sign:
+    name: sign the client and the component (Cloud KMS)
+    needs: [build, reproduce]
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    # The protected environment. Its name is part of the OIDC token, and Google's attribute condition requires exactly `release`.
+    environment:
+      name: release
+    permissions:
+      contents: read
+      id-token: write        # the OIDC token that Google exchanges for a short-lived credential: this job and `publish` are the only ones with it
+    steps:
+      - name: Require signed mode (there is no unsigned release)
+        env:
+          RELEASE_SIGNING: ${{ vars.RELEASE_SIGNING }}
+        run: |
+          [ "${RELEASE_SIGNING}" = "kms" ] || { echo "::error::the repository variable RELEASE_SIGNING must be 'kms': a Companion release is always signed (docs/RELEASING.md)"; exit 1; }
+
+      - name: Check out the tag
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
+
+      - name: Set up Node.js
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          package-manager-cache: false   # release jobs never use a build cache (cache poisoning)
+
+      - name: Install the production dependencies only; no install scripts run
+        run: pnpm install --frozen-lockfile --prod --ignore-scripts
+
+      - name: Download the build output
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: release-files
+          path: dist
+
+      - name: Download the release notes
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: release-notes
+          path: notes
+
+      - name: Check that everything this job uses is present, and that the files are the ones that were built
+        env:
+          VERSION: ${{ needs.build.outputs.version }}
+        run: |
+          set -euo pipefail
+          for f in dist/SHA256SUMS dist/client/manifest.json dist/client/index.html dist/client/loader.js "dist/component/companion-${VERSION}.zip" dist/component/manifest.json notes/RELEASE_NOTES.md; do
+            test -s "${f}" || { echo "::error::missing ${f}: an artifact was not downloaded"; exit 1; }
+          done
+          (cd dist && sha256sum --check --quiet SHA256SUMS)
+
+      - name: Fetch the previous component manifest (to keep the manifest counter monotonic and carry the blocked list)
+        run: |
+          set -euo pipefail
+          mkdir -p previous
+          code=$(curl -sS -o previous/manifest.json -w '%{http_code}' "${DOWNLOADS_URL}/companion/manifest.json" || true)
+          if [ "${code}" = "200" ]; then
+            curl -fsS -o previous/manifest.json.sig "${DOWNLOADS_URL}/companion/manifest.json.sig"
+            echo "previous component manifest found (it is verified against the pinned keys before use)"
+          elif [ "${code}" = "404" ]; then
+            rm -f previous/manifest.json; echo "no previous component manifest: this is the first signed release"
+          else
+            echo "::error::could not fetch the previous component manifest (HTTP ${code}); refusing to guess"; exit 1
+          fi
+
+      - name: Finalise the component manifest from the reproducible build output (it rebuilds nothing)
+        env:
+          RELEASE_EPOCH: ${{ vars.RELEASE_EPOCH }}
+        run: |
+          set -euo pipefail
+          mkdir -p signed/component
+          args=(--dir dist/component --out signed/component)
+          if [ -f previous/manifest.json ]; then args+=(--previous previous/manifest.json --previous-sig previous/manifest.json.sig); fi
+          if [ -n "${RELEASE_EPOCH:-}" ]; then args+=(--epoch "${RELEASE_EPOCH}"); fi
+          node --disable-warning=ExperimentalWarning apps/companion/scripts/assemble-component-manifest.mjs "${args[@]}"
+
+      - name: Authenticate to Google Cloud (workload identity federation, no key file)
+        id: auth
+        uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3.0.0
+        with:
+          workload_identity_provider: ${{ vars.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ vars.GCP_SERVICE_ACCOUNT }}
+          token_format: access_token
+          create_credentials_file: false
+          access_token_lifetime: 300s
+
+      - name: Sign the web client manifest with Cloud KMS (domain botwarren-client-v1; verified against the pinned public key before it is written)
+        env:
+          GOOGLE_OAUTH_ACCESS_TOKEN: ${{ steps.auth.outputs.access_token }}
+        run: node --disable-warning=ExperimentalWarning apps/companion/client/scripts/sign.mjs --kms "${KMS_KEY_VERSION}" --key-id "${KMS_KEY_ID}" --dir dist/client
+
+      - name: Sign the component manifest with Cloud KMS (domain botwarren-component-v1; the same check as the ship agent's installer, before it is written)
+        env:
+          GOOGLE_OAUTH_ACCESS_TOKEN: ${{ steps.auth.outputs.access_token }}
+        run: node --disable-warning=ExperimentalWarning apps/companion/vendor/agent/scripts/component-sign.mjs --kms "${KMS_KEY_VERSION}" --key-id "${KMS_KEY_ID}" signed/component/manifest.json
+
+      - name: Package the release (signed client, component, relay image inputs, SHA256SUMS) and verify it against the pinned keys
+        env:
+          VERSION: ${{ needs.build.outputs.version }}
+        run: |
+          set -euo pipefail
+          node --disable-warning=ExperimentalWarning apps/companion/scripts/stage-release.mjs \
+            --client dist/client --component-zip "dist/component/companion-${VERSION}.zip" --component-manifest signed/component/manifest.json --out signed-release
+          # an independent run of the check a downloader makes
+          node --disable-warning=ExperimentalWarning apps/companion/scripts/verify-release.mjs signed-release
+          { echo '### Signed release'; echo '```'; cat signed-release/SHA256SUMS; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Keep the signed release for the next jobs
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: signed-release
+          path: signed-release/
+          if-no-files-found: error
+          retention-days: 7
+
+  relay-image:
+    name: relay image from the signed inputs
+    needs: [build, sign]
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    steps:
+      - name: Download the signed release
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: signed-release
+          path: signed-release
+
+      - name: Build the image from the relay image inputs and smoke-test it
+        env:
+          VERSION: ${{ needs.build.outputs.version }}
+        run: |
+          set -euo pipefail
+          test -s "signed-release/relay-context-${VERSION}.tar.gz" || { echo "::error::the relay image inputs were not downloaded"; exit 1; }
+          (cd signed-release && sha256sum --check --quiet SHA256SUMS)
+          mkdir ctx
+          tar -xzf "signed-release/relay-context-${VERSION}.tar.gz" -C ctx
+          docker build -f ctx/Dockerfile.relay -t "botwarren-relay:${VERSION}" ctx
+          # 32 zero bytes as a placeholder ticket key: the smoke test only needs the relay to start and serve the client
+          docker run -d --name relay -p 18080:8080 -e RELAY_ORIGIN=https://relay.example.test -e RELAY_TICKET_KEYS=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA "botwarren-relay:${VERSION}"
+          for _ in $(seq 1 30); do curl -fsS http://127.0.0.1:18080/healthz >/dev/null 2>&1 && break; sleep 1; done
+          curl -fsS http://127.0.0.1:18080/healthz
+          # the relay serves exactly the signed manifest of this release
+          curl -fsS http://127.0.0.1:18080/manifest.json | cmp - signed-release/client-manifest.json
+          curl -fsS http://127.0.0.1:18080/manifest.json.sig | cmp - signed-release/client-manifest.json.sig
+          docker logs relay
+          docker rm -f relay
+
+  publish:
+    name: attest, upload and release
+    needs: [build, reproduce, sign, relay-image]
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    # The protected environment: required reviewer, restricted to v* tags. Holds R2_ACCESS_KEY_ID, R2_SECRET_ACCESS_KEY, R2_ENDPOINT.
+    environment:
+      name: release
+    permissions:
+      contents: write        # create the GitHub Release
+      id-token: write        # keyless signing of the attestations (Sigstore)
+      attestations: write    # store the attestations
+    steps:
+      - name: Download the signed release
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: signed-release
+          path: signed-release
+
+      - name: Download the release notes (the body of the GitHub Release)
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: release-notes
+          path: notes
+
+      - name: Check that everything this job uses is present, and that the files are the signed ones
+        env:
+          VERSION: ${{ needs.build.outputs.version }}
+        run: |
+          set -euo pipefail
+          for f in SHA256SUMS client-manifest.json client-manifest.json.sig component-manifest.json component-manifest.json.sig "client-${VERSION}.tar.gz" "companion-${VERSION}.zip" "relay-context-${VERSION}.tar.gz"; do
+            test -s "signed-release/${f}" || { echo "::error::missing signed-release/${f}: an artifact was not downloaded"; exit 1; }
+          done
+          test -s notes/RELEASE_NOTES.md || { echo "::error::missing notes/RELEASE_NOTES.md: the release notes artifact was not downloaded"; exit 1; }
+          (cd signed-release && sha256sum --check SHA256SUMS && ls -l)
+
+      - name: Attest build provenance
+        id: attest
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-checksums: signed-release/SHA256SUMS
+
+      # Uploaded in an order that makes a half-finished upload harmless: everything is immutable and versioned first, then the flat zip the ship agent
+      # reads, then the signature, then the manifest (which is what makes the release visible to the ship agent's installer), then latest.txt.
+      - name: Upload to Cloudflare R2
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          R2_ENDPOINT: ${{ secrets.R2_ENDPOINT }}
+          VERSION: ${{ needs.build.outputs.version }}
+          AWS_DEFAULT_REGION: auto
+          AWS_REQUEST_CHECKSUM_CALCULATION: when_required
+          AWS_RESPONSE_CHECKSUM_VALIDATION: when_required
+        run: |
+          set -euo pipefail
+          : "${AWS_ACCESS_KEY_ID:?R2_ACCESS_KEY_ID is not set in the release environment}"
+          : "${AWS_SECRET_ACCESS_KEY:?R2_SECRET_ACCESS_KEY is not set in the release environment}"
+          : "${R2_ENDPOINT:?R2_ENDPOINT is not set in the release environment}"
+          put() { aws s3 cp "$1" "s3://${R2_BUCKET}/$2" --endpoint-url "${R2_ENDPOINT}" --cache-control "$3" --only-show-errors; }
+          cd signed-release
+          # companion/<version>/ holds the whole release, immutable
+          for f in *; do put "$f" "companion/${VERSION}/$f" "public, max-age=31536000, immutable"; done
+          # flat copy of the zip: the ship agent reads companion/companion-<version>.zip next to companion/manifest.json
+          put "companion-${VERSION}.zip" "companion/companion-${VERSION}.zip" "public, max-age=31536000, immutable"
+          put component-manifest.json.sig companion/manifest.json.sig "public, max-age=300"
+          put component-manifest.json companion/manifest.json "public, max-age=300"
+          # latest.txt names the newest version; uploaded last: it makes the release current. (Not signed: as trustworthy as the host. The signed
+          # manifests are what clients verify.)
+          printf '%s\n' "${VERSION}" > "${RUNNER_TEMP}/latest.txt"
+          put "${RUNNER_TEMP}/latest.txt" companion/latest.txt "public, max-age=300"
+          echo "uploaded ${VERSION} to ${R2_BUCKET}/companion/"
+
+      - name: Create the GitHub Release with the same files
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+          VERSION: ${{ needs.build.outputs.version }}
+          ATTESTATION_BUNDLE: ${{ steps.attest.outputs.bundle-path }}
+        run: |
+          set -euo pipefail
+          cp "${ATTESTATION_BUNDLE}" "signed-release/attestations-${VERSION}.sigstore.jsonl"
+          flags=(--verify-tag --notes-file notes/RELEASE_NOTES.md --title "Botwarren Companion ${VERSION}")
+          case "${VERSION}" in 0.*) flags+=(--prerelease) ;; esac
+          gh release create "${TAG}" signed-release/* "${flags[@]}" --repo "${GITHUB_REPOSITORY}"

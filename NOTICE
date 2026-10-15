@@ -1,0 +1,11 @@
+Botwarren Companion
+Copyright 2026 TurboKast Ltd
+
+This product includes software developed at TurboKast Ltd (https://botwarren.com).
+
+Botwarren and TurboKast are names of TurboKast Ltd. The Apache License 2.0 does not grant
+permission to use these names or logos except for reasonable and customary use in describing
+the origin of the software (Section 6 of the License).
+
+The relay, the companion bundle and the web client use open-source libraries (ws, zod,
+qrcode-generator); their licences are in the respective packages (see pnpm-lock.yaml).

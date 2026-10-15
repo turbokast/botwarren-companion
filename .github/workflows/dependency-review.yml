@@ -1,0 +1,40 @@
+name: Dependency review
+
+# On every pull request: compare the dependencies the change adds or updates (from the lockfile) against the GitHub Advisory Database
+# and the licence policy, and fail on a known high or critical vulnerability or a licence outside the allow-list.
+#
+# The licence allow-list is what is compatible with distributing this project under Apache-2.0: permissive licences only. Weak and
+# strong copyleft (GPL, LGPL, AGPL, MPL on its own) are deliberately not listed, so adding such a dependency fails the check and
+# needs a conscious decision. An SPDX expression with OR (for example "MPL-2.0 OR Apache-2.0") passes when one side is allowed.
+# Runs with the read-only pull_request token; the summary is shown in the job summary rather than as a comment, which a fork's
+# token could not write.
+on:
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: dependency-review-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  dependency-review:
+    name: dependency-review
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Check out
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Review dependency changes
+        uses: actions/dependency-review-action@a1d282b36b6f3519aa1f3fc636f609c47dddb294 # v5.0.0
+        with:
+          fail-on-severity: high
+          fail-on-scopes: runtime, development
+          comment-summary-in-pr: never
+          allow-licenses: >-
+            Apache-2.0, MIT, MIT-0, ISC, BSD-2-Clause, BSD-3-Clause, 0BSD, BlueOak-1.0.0, CC0-1.0, CC-BY-4.0,
+            Python-2.0, Unlicense, Zlib

@@ -1,0 +1,16 @@
+# Everything needs a maintainer's review.
+*                          @Angry-Potato
+
+# The security boundary and everything that touches releases, signing or the served client: maintainers only, always.
+/apps/companion/src/protocol/   @Angry-Potato
+/apps/companion/src/policy.ts   @Angry-Potato
+/apps/companion/src/claude/     @Angry-Potato
+/apps/companion/client/         @Angry-Potato
+/apps/companion/scripts/        @Angry-Potato
+/apps/companion/vendor/         @Angry-Potato
+/apps/relay/                    @Angry-Potato
+/deploy/                        @Angry-Potato
+/.github/                       @Angry-Potato
+/SECURITY.md                    @Angry-Potato
+/LICENSE                        @Angry-Potato
+/NOTICE                         @Angry-Potato

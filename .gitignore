@@ -1,0 +1,19 @@
+node_modules/
+dist/
+coverage/
+.cache/
+dist-client/
+dist-component/
+test-results/
+playwright-report/
+# release signing keys must never be committed
+release-*.key
+release-*.pem
+*.p12
+*.p8
+.env
+.env.*
+*.db
+*.db-*
+*.log
+.DS_Store

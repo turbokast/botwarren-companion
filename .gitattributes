@@ -1,0 +1,9 @@
+# Every text file is checked out with LF on every OS, including Windows. Shell installers must have LF, and a CRLF `#!` line on
+# the scripts/*.mjs files breaks the test runner's module loader (the cause of the first Windows CI failure).
+* text=auto eol=lf
+*.sh text eol=lf
+*.ps1 text eol=lf
+*.mjs text eol=lf
+*.ts text eol=lf
+*.json text eol=lf
+*.png binary

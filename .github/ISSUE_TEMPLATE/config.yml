@@ -1,0 +1,11 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Ask a question or share an idea (Discussions)
+    url: https://github.com/turbokast/botwarren-companion/discussions
+    about: Questions, ideas and show-and-tell belong in Discussions. Issues are for bugs and accepted feature work.
+  - name: Report a security or privacy problem
+    url: https://github.com/turbokast/botwarren-companion/security/policy
+    about: Do not open a public issue. Use private vulnerability reporting on the Security tab, or email support@turbokast.com (see SECURITY.md).
+  - name: What the Companion can and cannot see
+    url: https://botwarren.com/trust.html#companion
+    about: The trust page explains what the Companion reads on your computer and what the relay and the website can see (ciphertext and metadata).

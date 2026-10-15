@@ -1,0 +1,31 @@
+# Botwarren Companion RELAY: a ciphertext-only WebSocket relay that also serves the SIGNED web client. It holds no keys and no content and stores nothing durable.
+#
+# Build it from the release's relay image inputs (relay-context-<version>.tar.gz, attached to every release), not from a checkout:
+#
+#   sha256sum --check --ignore-missing SHA256SUMS            # and: gh attestation verify relay-context-<version>.tar.gz --repo turbokast/botwarren-companion
+#   mkdir ctx && tar -xzf relay-context-<version>.tar.gz -C ctx && cd ctx
+#   docker build -f Dockerfile.relay -t botwarren-relay:<version> .
+#
+# The archive contains this file, the relay and protocol sources, the lockfile and client/ (the web client signed by the release key). The image builds
+# nothing from the network except the base image and the locked production dependencies. docs/RELAY.md lists the environment variables.
+FROM node:22.20.0-bookworm-slim AS build
+WORKDIR /app
+RUN corepack enable && corepack prepare pnpm@11.5.2 --activate
+COPY package.json pnpm-lock.yaml pnpm-workspace.yaml tsconfig.base.json ./
+COPY apps/companion/package.json apps/companion/
+COPY apps/relay/package.json apps/relay/
+RUN pnpm install --prod --frozen-lockfile --ignore-scripts --filter "@botwarren/relay..."
+COPY apps/companion/src apps/companion/src
+COPY apps/relay/src apps/relay/src
+
+FROM node:22.20.0-bookworm-slim
+ENV NODE_ENV=production PORT=8080 RELAY_CLIENT_DIR=/srv/client
+WORKDIR /srv
+COPY --from=build /app /srv
+COPY client /srv/client
+RUN useradd --uid 10001 --create-home relay
+USER relay
+EXPOSE 8080
+# Configuration is environment only (secrets are never baked into the image): RELAY_ORIGIN, RELAY_TICKET_KEYS (required); RELAY_ADMIN_TOKEN,
+# RELAY_KILLLIST_URL, RELAY_GLOBAL_KILL, RELAY_TRUST_FLY_PROXY (optional). No volume: the relay stores nothing durable.
+CMD ["node", "--disable-warning=ExperimentalWarning", "apps/relay/src/main.ts"]

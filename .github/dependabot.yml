@@ -1,0 +1,48 @@
+version: 2
+updates:
+  # Workflow actions are pinned to full commit SHAs; Dependabot keeps the SHAs (and the version comments) current.
+  # A 7 day cool-down means a freshly published release (which is where a compromised publish would be) is not proposed straight away.
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    cooldown:
+      default-days: 7
+    groups:
+      actions:
+        patterns: ['*']
+    labels: [dependencies, ci]
+    commit-message:
+      prefix: ci
+    open-pull-requests-limit: 5
+
+  # Runtime dependencies are few and pinned exactly (zod, ws, qrcode-generator, plus the MCP SDK for development). Dev tools are grouped into one
+  # weekly pull request; a runtime dependency gets its own so it is reviewed on its own. Dependabot security updates (Settings, Advanced Security)
+  # ignore the cool-down and the grouping and open a pull request as soon as an advisory exists. One workspace, so one entry at the root.
+  - package-ecosystem: npm
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    cooldown:
+      default-days: 7
+    groups:
+      dev-tooling:
+        dependency-type: development
+    labels: [dependencies]
+    commit-message:
+      prefix: deps
+    open-pull-requests-limit: 5
+
+  # The relay image is built from the release's own inputs (deploy/Dockerfile.relay): keep its base image current.
+  - package-ecosystem: docker
+    directory: /deploy
+    schedule:
+      interval: weekly
+      day: monday
+    cooldown:
+      default-days: 7
+    labels: [dependencies]
+    commit-message:
+      prefix: deps

@@ -1,0 +1,44 @@
+{
+  "name": "@botwarren/companion",
+  "version": "0.1.0",
+  "description": "Botwarren Companion: opt-in, end-to-end encrypted remote approvals for your coding agents. Separate from the metadata-only ship agent.",
+  "license": "Apache-2.0",
+  "private": true,
+  "type": "module",
+  "bin": {
+    "botwarren-companion": "./src/cli.ts"
+  },
+  "exports": {
+    "./protocol": "./src/protocol/index.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc -p tsconfig.json && tsc -p client/tsconfig.json",
+    "test": "vitest run",
+    "cli": "node --disable-warning=ExperimentalWarning src/cli.ts",
+    "build:client": "node --disable-warning=ExperimentalWarning client/scripts/build.mjs",
+    "test:e2e": "playwright test --workers=1"
+  },
+  "dependencies": {
+    "qrcode-generator": "2.0.4",
+    "zod": "4.6.5"
+  },
+  "devDependencies": {
+    "@modelcontextprotocol/sdk": "1.32.1",
+    "@types/node": "22.18.12",
+    "typescript": "5.9.3",
+    "vitest": "4.1.11",
+    "esbuild": "0.25.12",
+    "@playwright/test": "1.55.1"
+  },
+  "homepage": "https://botwarren.com",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/turbokast/botwarren-companion.git"
+  },
+  "bugs": {
+    "email": "support@turbokast.com"
+  },
+  "engines": {
+    "node": ">=22.18"
+  }
+}

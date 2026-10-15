@@ -1,0 +1,54 @@
+name: CodeQL
+
+# CodeQL code scanning, as a workflow file rather than GitHub's "default setup": the workflow is reviewed in pull requests, every
+# action in it is pinned to a commit SHA, it also scans the workflow files themselves (language `actions`), and the query suite is
+# chosen here (security-extended). Default setup must stay "not configured" in Settings, Advanced Security, or the two collide.
+#
+# Runs on pushes to main, on pull requests and every Monday (new queries find old bugs). No build is needed: JavaScript, TypeScript
+# and GitHub Actions are analysed from source (`build-mode: none`). Results go to Security, Code scanning.
+# Pull requests from forks run the analysis but cannot upload results (read-only token); that is expected.
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  schedule:
+    - cron: '23 4 * * 1'
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: codeql-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  analyze:
+    # The job names are the required status checks "Analyze (javascript-typescript)" and "Analyze (actions)" in the ruleset.
+    name: Analyze (${{ matrix.language }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      security-events: write   # upload the SARIF results to code scanning
+    strategy:
+      fail-fast: false
+      matrix:
+        language: [javascript-typescript, actions]
+    steps:
+      - name: Check out
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@2892aa5e19bbd11bc0cff5427e3b750a04d9e3c2 # v4.38.2
+        with:
+          languages: ${{ matrix.language }}
+          build-mode: none
+          queries: security-extended
+
+      - name: Analyze
+        uses: github/codeql-action/analyze@2892aa5e19bbd11bc0cff5427e3b750a04d9e3c2 # v4.38.2
+        with:
+          category: /language:${{ matrix.language }}

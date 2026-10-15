@@ -1,0 +1,65 @@
+name: DCO
+
+# Every commit in a pull request must carry a Developer Certificate of Origin sign-off (`git commit -s`):
+#   Signed-off-by: Real Name <email>
+# whose name and email match the commit's author or committer. This is a plain shell check over the pull request's own commits, with no
+# third-party action and no token beyond a read-only checkout. Merge commits and commits by the dependency bots are exempt.
+# (If the maintainer later installs the DCO GitHub App, this workflow can be removed.)
+on:
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: dco-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  dco:
+    name: dco
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Check out the pull request with its history
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Check sign-offs
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          failed=0
+          checked=0
+          while IFS= read -r sha; do
+            [ -n "${sha}" ] || continue
+            author_name=$(git show -s --format='%an' "${sha}")
+            author_email=$(git show -s --format='%ae' "${sha}")
+            committer_name=$(git show -s --format='%cn' "${sha}")
+            committer_email=$(git show -s --format='%ce' "${sha}")
+            case "${author_email}" in
+              *'[bot]@users.noreply.github.com'|dependabot*) echo "skip ${sha:0:10} (bot: ${author_name})"; continue ;;
+            esac
+            checked=$((checked + 1))
+            ok=0
+            while IFS= read -r line; do
+              case "${line}" in
+                "Signed-off-by: ${author_name} <${author_email}>"|"Signed-off-by: ${committer_name} <${committer_email}>") ok=1 ;;
+              esac
+            done < <(git show -s --format='%B' "${sha}")
+            if [ "${ok}" -eq 1 ]; then
+              echo "ok   ${sha:0:10} $(git show -s --format='%s' "${sha}")"
+            else
+              echo "::error title=Missing sign-off::commit ${sha:0:10} has no 'Signed-off-by: ${author_name} <${author_email}>' line (use git commit -s, or git rebase --signoff main)"
+              failed=1
+            fi
+          done < <(git rev-list --no-merges "${BASE_SHA}..${HEAD_SHA}")
+          echo "checked ${checked} commit(s)"
+          if [ "${failed}" -ne 0 ]; then
+            echo "Every commit needs a DCO sign-off: see CONTRIBUTING.md, section 'Licence and sign-off (DCO)'."
+            exit 1
+          fi

@@ -1,0 +1,52 @@
+name: Bug report
+description: Something does not work as described
+title: '[Bug]: '
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting. **Do not paste secrets, tokens, keys, pairing codes, prompts, code or messages from your agents.** Redact them.
+        If this is a security or privacy problem (the Companion, the relay or the web client exposed, accepted or sent something it should not), do not file it here: email support@turbokast.com (see SECURITY.md).
+  - type: input
+    id: version
+    attributes:
+      label: Companion version
+      description: Output of `botwarren-companion version`, and the build id shown in the web client (Settings)
+    validations:
+      required: true
+  - type: dropdown
+    id: os
+    attributes:
+      label: Operating system of the computer running your agent
+      options: [Linux, macOS, Windows]
+    validations:
+      required: true
+  - type: input
+    id: claude
+    attributes:
+      label: Claude Code version and how the channel was started
+      description: Output of `claude --version`, and whether you started a session with the channel flag (see the README)
+  - type: dropdown
+    id: where
+    attributes:
+      label: Where does it go wrong?
+      options: [Pairing, Web client on the phone or browser, Approvals do not arrive, Approvals do not apply, Install through the ship agent, Relay, Something else]
+    validations:
+      required: true
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened, and what did you expect?
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: Steps to reproduce
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant lines from `botwarren-companion log`
+      description: The local audit log holds kinds, outcomes and times, never message content, but check it before pasting.
+      render: text

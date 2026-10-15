@@ -1,0 +1,10 @@
+{
+  "name": "Botwarren Link",
+  "short_name": "Link",
+  "description": "Answer your coding agents from your own phone. End-to-end encrypted.",
+  "start_url": ".",
+  "display": "standalone",
+  "background_color": "#050816",
+  "theme_color": "#050816",
+  "icons": [{ "src": "icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any" }]
+}

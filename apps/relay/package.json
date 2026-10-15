@@ -1,0 +1,35 @@
+{
+  "name": "@botwarren/relay",
+  "version": "0.1.0",
+  "description": "Botwarren Companion relay: carries end-to-end encrypted frames between a user's machine and their paired devices. Cannot read or forge them.",
+  "license": "Apache-2.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "node --disable-warning=ExperimentalWarning src/main.ts",
+    "typecheck": "tsc -p tsconfig.json",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@botwarren/companion": "workspace:*",
+    "ws": "8.18.3",
+    "zod": "4.6.5"
+  },
+  "devDependencies": {
+    "@types/node": "22.18.12",
+    "@types/ws": "8.18.1",
+    "typescript": "5.9.3",
+    "vitest": "4.1.11"
+  },
+  "homepage": "https://botwarren.com",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/turbokast/botwarren-companion.git"
+  },
+  "bugs": {
+    "email": "support@turbokast.com"
+  },
+  "engines": {
+    "node": ">=22.18"
+  }
+}
