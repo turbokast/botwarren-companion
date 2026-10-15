@@ -79,7 +79,7 @@ jobs:
           for f in apps/companion/package.json apps/relay/package.json; do
             [ "$(node -p "require('./${f}').version")" = "${version}" ] || { echo "::error::${f} is not ${version}"; exit 1; }
           done
-          grep -q "VERSION = '${version}'" apps/companion/src/commands.ts || { echo "::error::apps/companion/src/commands.ts is not ${version}"; exit 1; }
+          grep -q "VERSION = '${version}'" apps/companion/src/version.ts || { echo "::error::apps/companion/src/version.ts is not ${version}"; exit 1; }
           git fetch --no-tags origin main
           git merge-base --is-ancestor "${GITHUB_SHA}" origin/main || { echo "::error::tag ${TAG} is not on main"; exit 1; }
           echo "version=${version}" >> "$GITHUB_OUTPUT"
