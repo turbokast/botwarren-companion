@@ -3,6 +3,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { PassThrough } from 'node:stream';
 import { Relay } from '../../relay/src/relay.ts';
+import { generateVapidKeys } from '../../relay/src/webpush.ts';
 import { b64u, generateIdentity, signTicket, type Identity } from '../src/protocol/index.ts';
 import { startDaemon, type Daemon } from '../src/daemon.ts';
 import { runChannelServer } from '../src/claude/channel.ts';
@@ -10,10 +11,27 @@ import { runHook } from '../src/claude/hookClient.ts';
 import { connectDaemon } from '../src/ipc.ts';
 import { SimDevice } from './simdevice.ts';
 
+/** a stand-in for a browser push service: records what the relay delivers and answers with the status the test sets */
+export interface MockPush {
+  fetchImpl: typeof fetch;
+  posts: { url: string; headers: Record<string, string>; body: Buffer }[];
+  status: number;
+}
+export function mockPush(): MockPush {
+  const m: MockPush = { posts: [], status: 201, fetchImpl: undefined as never };
+  m.fetchImpl = (async (url: string | URL | Request, init?: RequestInit) => {
+    m.posts.push({ url: String(url), headers: Object.fromEntries(Object.entries((init?.headers ?? {}) as Record<string, string>)), body: Buffer.from(init?.body as Uint8Array) });
+    return new Response(null, { status: m.status });
+  }) as typeof fetch;
+  return m;
+}
+
 export interface World {
   dir: string;
   claudeDir: string;
   relay: Relay;
+  /** present when the world was started with `push` */
+  push: MockPush | null;
   base: string;
   server: Identity;
   daemon: Daemon;
@@ -34,13 +52,14 @@ export interface Channel {
   stop(): void;
 }
 
-export async function startWorld(o: { now?: () => number; clientDir?: string } = {}): Promise<World> {
+export async function startWorld(o: { now?: () => number; clientDir?: string; push?: boolean } = {}): Promise<World> {
   const dir = mkdtempSync(join(tmpdir(), 'bwc-'));
   const claudeDir = join(dir, 'claude');
   mkdirSync(join(claudeDir, 'projects', 'p'), { recursive: true });
   process.env.CLAUDE_CONFIG_DIR = claudeDir;
   const server = await generateIdentity(true);
-  const relay = new Relay({ port: 0, host: '127.0.0.1', ticketKeys: [server.pub], ...(o.clientDir ? { clientDir: o.clientDir } : {}) });
+  const push = o.push ? mockPush() : null;
+  const relay = new Relay({ port: 0, host: '127.0.0.1', ticketKeys: [server.pub], ...(o.clientDir ? { clientDir: o.clientDir } : {}), ...(push ? { push: { vapid: generateVapidKeys(), subject: 'mailto:test@example.com', fetchImpl: push.fetchImpl } } : {}) });
   const port = await relay.listen();
   relay.origin = `http://127.0.0.1:${port}`;
   const base = relay.origin;
@@ -58,7 +77,7 @@ export async function startWorld(o: { now?: () => number; clientDir?: string } =
   const channels: Channel[] = [];
 
   const world: World = {
-    dir, claudeDir, relay, base, server, daemon, env,
+    dir, claudeDir, relay, push, base, server, daemon, env,
     async pairDevice(name = 'Sim phone') {
       const link = await connectDaemon(env.BOTWARREN_COMPANION_HOME);
       if (!link) throw new Error('no daemon link');

@@ -40,7 +40,7 @@ export async function makeRelayContext({ root = resolve(here, '..', '..', '..'),
   if (!verifySig(manifestBytes, readFileSync(join(client, 'manifest.json.sig'), 'utf8'), pinned)) throw new Error('the client signature does not verify against the pinned component keys; refusing to package it');
   const m = JSON.parse(manifestBytes.toString('utf8'));
   // every file the signed manifest lists must be there with the stated hash (the loader would refuse the client otherwise)
-  for (const f of [m.entry.js, m.entry.css, m.loader]) if (sha(readFileSync(join(client, f.path))) !== f.sha256) throw new Error(`client file ${f.path} does not match the signed manifest`);
+  for (const f of [m.entry.js, m.entry.css, m.loader, ...(m.sw ? [m.sw] : [])]) if (sha(readFileSync(join(client, f.path))) !== f.sha256) throw new Error(`client file ${f.path} does not match the signed manifest`);
 
   /** @type {Map<string, Buffer>} */
   const files = new Map();

@@ -60,7 +60,7 @@ export async function verifyReleaseDir({ dir, allowDev = false, now = new Date()
   if (problems.length) return { ok: false, problems, version };
 
   const clientFiles = new Map(readTarGz(read(`client-${version}.tar.gz`)).map((e) => [e.name, e.data]));
-  const named = [clientManifest.entry.js, clientManifest.entry.css, clientManifest.loader];
+  const named = [clientManifest.entry.js, clientManifest.entry.css, clientManifest.loader, ...(clientManifest.sw ? [clientManifest.sw] : [])]; // sw: the alert service worker, pinned by hash (0.1.2 and later)
   for (const f of named) {
     const d = clientFiles.get(f.path);
     if (!d) bad(`the client archive lacks ${f.path}`);

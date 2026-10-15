@@ -4,10 +4,11 @@
  */
 import {
   KemKeyring, ReplayGuard, SendCounter, b64u, derivePairKeys, generateIdentity, idOf, openMessage, openOffer, openResult, parseCode, sealMessage, sealRequest, shortAuthString,
-  unb64u, verifyDeviceCert, StateData, ResultData, type KemEntry, type Signed, type Identity, type ActionData, type Frame, peekHeader,
+  unb64u, verifyDeviceCert, StateData, ResultData, PushAckData, type KemEntry, type Signed, type Identity, type ActionData, type Frame, peekHeader,
 } from '../../src/protocol/index.ts';
 import { RelayConnection, type ConnState } from '../../src/link/connection.ts';
 import { idbDel, idbGet, idbPut } from './idb.ts';
+import { currentSubscription, wantsAlerts } from './alerts.ts';
 
 const KEY = 'device';
 const ROTATE_MS = 7 * 86_400_000;
@@ -35,6 +36,9 @@ export class Link {
   hostOnline: boolean | null = null;
   conn: ConnState = 'idle';
   revoked = false;
+  /** what the computer says about this phone's alerts (null until it has said): on, and why not if not */
+  alerts: PushAckData | null = null;
+  private alertWaiters: ((a: PushAckData | null) => void)[] = [];
   readonly results = new Map<string, Outcome>();
   private connection: RelayConnection | null = null;
   private ident!: Identity;
@@ -132,7 +136,7 @@ export class Link {
       onState: (s, info) => {
         this.conn = s;
         if (info?.peerOnline !== undefined) this.hostOnline = info.peerOnline;
-        if (s === 'online') { void this.send('sync', {}); void this.maybeRotate(); }
+        if (s === 'online') { void this.send('sync', {}); void this.maybeRotate(); void this.resendAlerts(); }
         if (s === 'killed') { this.revoked = true; }
         this.emit();
       },
@@ -153,6 +157,7 @@ export class Link {
       case 'state': { const s = StateData.safeParse(r.msg.data); if (s.success) { this.state = s.data; this.emit(); } return; }
       case 'result': { const x = ResultData.safeParse(r.msg.data); if (x.success) { this.results.set(x.data.rid, x.data.outcome); if (['applied', 'denied', 'expired', 'stale', 'failed'].includes(x.data.outcome)) this.dropPending(x.data.rid); this.waiters.get(x.data.rid)?.(x.data.outcome); this.waiters.delete(x.data.rid); this.emit(); } return; }
       case 'keyupdate': { const d = r.msg.data as { ep?: number; kem?: string }; if (typeof d.ep === 'number' && typeof d.kem === 'string' && d.ep > this.saved.hostEp) { this.saved.hostEp = d.ep; this.saved.hostKem = d.kem; void this.persist(); } return; }
+      case 'pushack': { const a = PushAckData.safeParse(r.msg.data); if (a.success) { this.alerts = a.data; for (const w of this.alertWaiters.splice(0)) w(a.data); this.emit(); } return; }
       case 'revoked': { this.revoked = true; await this.forgetLocal(); this.emit(); return; }
       default: return;
     }
@@ -168,6 +173,23 @@ export class Link {
     if (!this.connection) return false;
     const frame = await sealMessage({ from: this.ident, to: { id: this.hostId, kemPub: unb64u(this.saved.hostKem), epoch: this.saved.hostEp }, seq: this.counter.next() + 1, now: Date.now(), ttlMs: 120_000, kind, data });
     return this.connection.sendFrame(frame);
+  }
+
+  /**
+   * Gives the computer this phone's Web Push subscription (or withdraws it), inside the encrypted channel, and waits for its answer. Resolves null if
+   * the computer is not reachable: the page sends the subscription again whenever it connects, as long as the person has alerts on.
+   */
+  async setAlerts(sub: { endpoint: string; p256dh: string; auth: string } | null): Promise<PushAckData | null> {
+    const answer = new Promise<PushAckData | null>((ok) => { const t = setTimeout(() => ok(null), 15_000); this.alertWaiters.push((a) => { clearTimeout(t); ok(a); }); });
+    if (!(await this.send('push', sub ? { on: true, sub } : { on: false }))) { this.alertWaiters.pop(); return null; }
+    return answer;
+  }
+
+  /** the subscription can change (the browser rotates it); the computer always gets the current one while alerts are on */
+  private async resendAlerts(): Promise<void> {
+    if (!wantsAlerts()) return;
+    const sub = await currentSubscription();
+    if (sub) await this.send('push', { on: true, sub });
   }
 
   /** the device rotates its encryption key every 7 days and tells the computer */

@@ -3,9 +3,24 @@
  */
 import { Link, type Outcome } from './link.ts';
 import { ago, h, mount } from './ui.ts';
+import { clearShown, detectSupport, disable as disableAlerts, enable as enableAlerts, permission, wantsAlerts, type AlertResult, type SwPin } from './alerts.ts';
 import type { Pending, SessionState } from '../../src/protocol/index.ts';
 
-export interface BuildInfo { build: string; version: string; keyId: string; expires: string }
+export interface BuildInfo { build: string; version: string; keyId: string; expires: string; sw?: SwPin }
+
+type Tone = 'good' | 'warn' | 'bad' | 'info';
+const RID = /^[a-z0-9-]{4,40}$/;
+const ridFromHash = (): string | null => /^#\/r\/([a-z0-9-]{4,40})$/.exec(location.hash)?.[1] ?? null;
+
+const ALERT_RESULT: Record<AlertResult, { tone: Tone; text: string }> = {
+  ok: { tone: 'good', text: 'Alerts are set up on this phone.' },
+  denied: { tone: 'warn', text: 'Notifications are blocked for this site. Allow them in the browser or phone settings, then try again.' },
+  dismissed: { tone: 'warn', text: 'No permission was given, so alerts stay off.' },
+  unavailable: { tone: 'warn', text: 'This relay is not set up to send alerts.' },
+  bad_worker: { tone: 'bad', text: 'The alert helper on this page did not match its signature, so it was not started.' },
+  failed: { tone: 'bad', text: 'Could not turn alerts on in this browser. Try again. On iPhone, open this page from the Home Screen.' },
+  unsupported: { tone: 'warn', text: 'This browser cannot show alerts.' },
+};
 
 type Screen = { t: 'pair'; prefill: string; error?: string } | { t: 'sas'; sas: string; note?: string } | { t: 'home' } | { t: 'card'; sid: string } | { t: 'devices' } | { t: 'gone'; why: string };
 
@@ -30,12 +45,83 @@ export async function start(info: BuildInfo): Promise<void> {
   let screen: Screen = link ? { t: 'home' } : { t: 'pair', prefill: codeFromHash() };
   let notice: { tone: 'good' | 'warn' | 'bad' | 'info'; text: string } | null = null;
   let lastWaiting = 0;
+  let wantRid: string | null = ridFromHash();
+  let wantTimer: ReturnType<typeof setTimeout> | null = null;
+  let alertsBusy = false;
+  let alertNote: { tone: Tone; text: string } | null = null;
+  const support = detectSupport();
+  let promptHidden = ((): boolean => { try { return localStorage.getItem('bw-alerts-dismissed') === '1'; } catch { return false; } })();
   const unsupported = !globalThis.crypto?.subtle || !globalThis.indexedDB;
 
   const go = (s: Screen): void => { screen = s; notice = null; render(); };
   const top = (right?: HTMLElement): HTMLElement => h('div', { class: 'topbar' }, h('span', { class: 'wm' }, 'Botwarren'), h('span', { class: 'wmsub' }, 'LINK'), h('span', { class: 'spacer' }), right ?? h('span', { class: 'mini', 'data-testid': 'build' }, `build ${info.build}`));
 
   function codeFromHash(): string { const m = /^#\/pair\/([0-9A-Za-z-]{16,24})$/.exec(location.hash); return m?.[1] ?? ''; }
+
+  // ------------------------------------------------------------------ alerts
+  type AlertView = 'unsupported' | 'ios-install' | 'denied' | 'off' | 'pending' | 'host_off' | 'on';
+  function alertView(l: Link): AlertView {
+    if (support !== 'ok') return support;
+    if (permission() === 'denied') return 'denied';
+    if (l.alerts?.on) return l.alerts.why === 'host_off' ? 'host_off' : 'on';
+    return wantsAlerts() && l.alerts === null ? 'pending' : 'off';
+  }
+
+  async function toggleAlerts(l: Link, on: boolean): Promise<void> {
+    alertsBusy = true; alertNote = null; render();
+    if (on) {
+      const r = await enableAlerts(l, info.sw);
+      alertNote = r === 'ok' ? (l.alerts?.on ? { tone: 'good', text: 'Alerts are on. You will get "An agent is waiting for you" when one needs you.' } : { tone: 'warn', text: 'Alerts are set up on this phone. Your computer will start sending them once it is reachable.' }) : ALERT_RESULT[r];
+    } else { await disableAlerts(l); alertNote = { tone: 'info', text: 'Alerts are off on this phone.' }; }
+    alertsBusy = false; render();
+  }
+
+  function alertsCard(l: Link): HTMLElement {
+    const v = alertView(l);
+    const on = v === 'on' || v === 'host_off' || v === 'pending';
+    const state = v === 'on' ? 'On' : v === 'pending' ? 'Setting up' : v === 'host_off' ? 'Off on computer' : 'Off';
+    const body: (HTMLElement | null)[] = [
+      h('div', { class: 'row between' }, h('b', {}, 'Alerts on this phone'), h('span', { class: v === 'on' ? 'pill live' : 'pill off', 'data-testid': 'alerts-state' }, state)),
+      h('p', { class: 'fine' }, 'A notification that says only "An agent is waiting for you". It never shows your agents\' text, commands or project names, and your computer sends it without Botwarren being able to read it.'),
+    ];
+    if (v === 'ios-install') body.push(h('div', { class: 'callout warn', 'data-testid': 'alerts-ios' }, 'On iPhone and iPad, alerts work only from the Home Screen. Tap Share, then Add to Home Screen, open Botwarren Link from there, pair it again, and turn alerts on.'));
+    else if (v === 'unsupported') body.push(h('div', { class: 'callout warn' }, 'This browser cannot show alerts.'));
+    else if (v === 'denied') body.push(h('div', { class: 'callout warn', 'data-testid': 'alerts-denied' }, ALERT_RESULT.denied.text));
+    else body.push(h('button', { class: on ? 'ghost full' : 'cta full', 'data-testid': 'alerts-toggle', disabled: alertsBusy, onclick: () => { void toggleAlerts(l, !on); } }, alertsBusy ? 'Working...' : on ? 'Turn alerts off' : 'Turn alerts on'));
+    if (v === 'host_off') body.push(h('div', { class: 'callout warn' }, 'Alerts are switched off on your computer. Switch them on there: botwarren-companion alerts on'));
+    if (alertNote) body.push(h('div', { class: `callout ${alertNote.tone}`, role: 'status', 'data-testid': 'alerts-note' }, alertNote.text));
+    return h('div', { class: 'card col', 'data-testid': 'alerts-card' }, ...body);
+  }
+
+  /** a one-time nudge on the home screen; "Not now" is remembered on this phone */
+  function alertsPrompt(l: Link): HTMLElement | null {
+    const v = alertView(l);
+    if (promptHidden || (v !== 'off' && v !== 'ios-install')) return null;
+    const hide = (): void => { promptHidden = true; try { localStorage.setItem('bw-alerts-dismissed', '1'); } catch { /* shown again next visit */ } render(); };
+    return h('div', { class: 'callout', 'data-testid': 'alerts-prompt' },
+      h('b', {}, 'Get an alert when an agent is waiting. '), v === 'ios-install' ? 'On iPhone this needs the Home Screen: see Devices and settings.' : 'No text, no names: only that it needs you.',
+      h('div', { class: 'row gap wrap mt' }, v === 'off' ? h('button', { class: 'ghost', 'data-testid': 'alerts-prompt-on', onclick: () => { void toggleAlerts(l, true); } }, 'Turn on') : null, h('button', { class: 'ghost', 'data-testid': 'alerts-prompt-off', onclick: hide }, 'Not now')));
+  }
+
+  /** a tap on an alert (or a link to one) opens that request, if it is still waiting, and says so truthfully if it is not */
+  function resolveWant(): void {
+    if (wantRid === null) return;
+    if (!link) { wantRid = null; return; }
+    if (!link.state) return; // wait for the first state (a timer gives up)
+    const rid = wantRid; wantRid = null;
+    if (wantTimer) { clearTimeout(wantTimer); wantTimer = null; }
+    try { history.replaceState(null, '', location.pathname); } catch { /* the address stays */ }
+    const s = rid === 'any' ? undefined : link.state.sessions.find((x) => x.pending?.rid === rid);
+    if (s) { screen = { t: 'card', sid: s.sid }; notice = null; return; }
+    screen = { t: 'home' };
+    notice = rid === 'any' ? null : { tone: 'info', text: 'That request was already answered, or it expired. Nothing is waiting on it now.' };
+  }
+  function want(rid: string | null): void {
+    wantRid = rid ?? 'any';
+    if (wantTimer) clearTimeout(wantTimer);
+    wantTimer = setTimeout(() => { if (wantRid !== null) { wantRid = null; notice = { tone: 'warn', text: 'No answer from your computer yet. It may be offline.' }; render(); } }, 10_000);
+    render();
+  }
 
   // ------------------------------------------------------------------ screens
   function pairView(s: Extract<Screen, { t: 'pair' }>): HTMLElement[] {
@@ -91,6 +177,7 @@ export async function start(info: BuildInfo): Promise<void> {
       h('div', { class: 'row between' }, statusPill(l), h('span', { class: 'mini' }, st ? `${st.host.name} · updated ${ago(Date.now())}` : '')),
       st?.host.paused ? h('div', { class: 'callout bad' }, 'Remote answers are paused on your computer.') : null,
       notice ? h('div', { class: `callout ${notice.tone}`, role: 'status', 'data-testid': 'notice' }, notice.text) : null,
+      alertsPrompt(l),
       h('p', { class: 'h3' }, `Waiting for you · ${waiting.length}`),
       ...(waiting.length ? waiting.map((s) => row(s)) : [h('p', { class: 'fine', 'data-testid': 'none-waiting' }, st ? 'Nothing is waiting for you.' : 'Waiting for your computer.')]),
       rest.length ? h('p', { class: 'h3' }, `Not waiting · ${rest.length}`) : null,
@@ -146,6 +233,7 @@ export async function start(info: BuildInfo): Promise<void> {
       h('div', { class: 'col page' },
         ...devs.map((d) => h('div', { class: 'card col', 'data-testid': 'device' }, h('div', { class: 'row between' }, h('b', {}, d.name, d.id8 === l.id8 ? h('span', { class: 'tag' }, 'this phone') : null), h('span', { class: d.id8 === l.id8 ? 'pill live' : 'pill off' }, d.id8 === l.id8 ? 'Paired' : d.lastSeen ? `Seen ${ago(d.lastSeen)}` : 'Never seen')))),
         devs.length === 0 ? h('div', { class: 'card col' }, h('b', {}, l.name, h('span', { class: 'tag' }, 'this phone'))) : null,
+        alertsCard(l),
         h('div', { class: 'callout' }, h('b', {}, 'Removing a device'), ' is done on your computer: ', h('span', { class: 'mono' }, 'botwarren-companion devices revoke'), '. Lost a phone? Do that first.'),
         h('div', { class: 'card col' }, h('span', { class: 'lbl' }, 'This page'), h('span', { class: 'mini', 'data-testid': 'build-detail' }, `build ${info.build} · version ${info.version} · signed with release key ${info.keyId} · verified at start`)),
         h('button', { class: 'ghost danger full pushdown', 'data-testid': 'forget', onclick: () => { void (async () => { if (confirm('Forget this phone? You will need to pair it again.')) { await l.forget(); link = null; go({ t: 'pair', prefill: '' }); } })(); } }, 'Forget this phone'))];
@@ -159,6 +247,7 @@ export async function start(info: BuildInfo): Promise<void> {
   function render(): void {
     if (unsupported) { mount(root!, ...[top(), h('div', { class: 'col page' }, h('div', { class: 'callout bad' }, 'This browser is too old. It cannot keep keys safely. Use a current Chrome, Safari or Firefox.'))]); return; }
     if (link?.revoked && screen.t !== 'gone' && screen.t !== 'pair') { link = null; screen = { t: 'gone', why: 'This phone was removed, or remote approvals were switched off for your account.' }; }
+    resolveWant();
     let nodes: HTMLElement[];
     switch (screen.t) {
       case 'pair': nodes = pairView(screen); break;
@@ -171,16 +260,28 @@ export async function start(info: BuildInfo): Promise<void> {
     mount(root!, ...nodes);
     const waiting = link?.state?.sessions.filter((x) => x.pending).length ?? 0;
     document.title = waiting ? `(${waiting}) Botwarren Link` : 'Botwarren Link';
-    if (waiting > lastWaiting && document.hidden && 'Notification' in globalThis && Notification.permission === 'granted') new Notification('Botwarren', { body: 'An agent is waiting for you', tag: 'bw-waiting' });
+    if (waiting === 0 && lastWaiting > 0) void clearShown(); // answered somewhere: the alert in the tray would only be stale
     lastWaiting = waiting;
   }
 
   function attach(l: Link): void { l.onChange(render); l.connect(); }
   function defaultName(): string { const ua = navigator.userAgent; return /iPhone/.test(ua) ? 'iPhone' : /iPad/.test(ua) ? 'iPad' : /Android/.test(ua) ? 'Android phone' : 'Browser'; }
 
-  window.addEventListener('hashchange', () => { if (screen.t === 'pair') { screen = { t: 'pair', prefill: codeFromHash() }; render(); } });
+  window.addEventListener('hashchange', () => {
+    if (screen.t === 'pair') { screen = { t: 'pair', prefill: codeFromHash() }; render(); return; }
+    const rid = ridFromHash();
+    if (rid) want(rid); else if (location.hash === '#/waiting') want(null);
+  });
+  // a tap on an alert while this page is already open arrives from the service worker
+  try {
+    navigator.serviceWorker?.addEventListener('message', (e: MessageEvent) => {
+      const d = e.data as { t?: unknown; rid?: unknown } | null;
+      if (d?.t === 'bw-open') want(typeof d.rid === 'string' && RID.test(d.rid) ? d.rid : null);
+    });
+  } catch { /* no service worker support: alerts are not offered either */ }
   setInterval(() => { if (screen.t === 'home' || screen.t === 'devices') render(); }, 30_000);
   if (link) attach(link);
   render();
-  if (!unsupported && 'Notification' in globalThis && Notification.permission === 'default') { /* asked from the devices screen in a later version; never on load */ }
+  if (wantRid !== null) want(wantRid);
+  if (location.hash === '#/waiting') want(null);
 }

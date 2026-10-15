@@ -280,11 +280,17 @@ export async function install(o) {
   const previous = readJson(join(o.dir, 'install.json'));
   writeAtomic(join(o.dir, 'state.json'), JSON.stringify({ highestManifestVersion: Math.max(high, v.manifest.manifestVersion), epoch: Math.max(epochFloor, v.manifest.epoch) }) + '\n');
   writeAtomic(join(o.dir, 'install.json'), JSON.stringify({ how: 'manual', version, sha256: digest, keyId: v.keyId, manifestVersion: v.manifest.manifestVersion, installedAt: now.toISOString() }, null, 2) + '\n', 0o644);
-  log(`==> Installed companion ${version} in ${versionDir}${previous?.version && previous.version !== version ? ` (replaces ${previous.version}; if you installed Claude Code hooks, run "botwarren-companion claude install-hooks" again to point them at the new version)` : ''}`);
+  log(`==> Installed companion ${version} in ${versionDir}${previous?.version && previous.version !== version ? ` (replaces ${previous.version}; Claude Code's hooks and channel use the stable launcher in the companion's own folder and move over when the new daemon starts. If they were installed by 0.1.1 or earlier, run "botwarren-companion claude install-hooks --yes" and "botwarren-companion claude register-channel --yes" once)` : ''}`);
 
   const shim = writeShim(o, version, entry, win);
   let svc = null;
   if (o.service) svc = installService(o, entry);
+  else {
+    // an UPDATE: a background service installed earlier still points at the folder of the OLD version. Point it at this one and restart it, so the new
+    // version is the one that runs (and, with it, the one Claude Code's hooks reach); a file this installer did not write is never touched
+    const sp = servicePaths(o);
+    if (ownedService(sp.file)) { log('==> The background service from an earlier install is moved to this version'); svc = installService(o, entry, { restart: true }); }
+  }
   return { status: previous?.version === version ? 'reinstalled' : 'installed', version, shim, service: svc };
 }
 
@@ -335,7 +341,10 @@ export function serviceText(kind, node, entry, logFile) {
   return `' ${SHIM_MARKER}: starts the companion daemon at sign-in, hidden\r\nCreateObject("WScript.Shell").Run """${vq(node)}"" --disable-warning=ExperimentalWarning ""${vq(entry)}"" daemon", 0, False\r\n`;
 }
 
-function installService(o, entry) {
+/** is this service file one this installer wrote? (its text names the companion; any other file is left alone) */
+function ownedService(file) { try { const t = readFileSync(file, 'utf8'); return t.includes('Botwarren Companion') || t.includes(SERVICE.launchd) || t.includes(SHIM_MARKER); } catch { return false; } }
+
+function installService(o, entry, { restart = false } = {}) {
   const sp = servicePaths(o);
   const node = o.nodePath ?? process.execPath;
   const logFile = join(o.dir, 'daemon.log');
@@ -347,11 +356,12 @@ function installService(o, entry) {
   if (sp.kind === 'systemd') {
     run('systemctl', ['--user', 'daemon-reload']);
     started = run('systemctl', ['--user', 'enable', '--now', SERVICE.systemd]);
+    if (started && restart) started = run('systemctl', ['--user', 'restart', SERVICE.systemd]);
     if (!started) o.log('    could not start it with systemd --user here. Start the daemon yourself: botwarren-companion daemon (leave it running)');
     else o.log('    running. (To keep it running when you are logged out: loginctl enable-linger $USER)');
   } else if (sp.kind === 'launchd') {
     const uid = String(process.getuid?.() ?? '');
-    started = run('launchctl', ['bootstrap', `gui/${uid}`, sp.file]) || run('launchctl', ['load', '-w', sp.file]);
+    started = restart ? (run('launchctl', ['kickstart', '-k', `gui/${uid}/${SERVICE.launchd}`]) || run('launchctl', ['bootstrap', `gui/${uid}`, sp.file]) || run('launchctl', ['load', '-w', sp.file])) : (run('launchctl', ['bootstrap', `gui/${uid}`, sp.file]) || run('launchctl', ['load', '-w', sp.file]));
     o.log(started ? '    running.' : '    could not start it with launchd here. Start the daemon yourself: botwarren-companion daemon (leave it running)');
   } else {
     o.log('    it starts the next time you sign in to Windows. To start it now: botwarren-companion daemon (leave the window open), or sign out and in.');

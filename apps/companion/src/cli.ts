@@ -24,7 +24,7 @@ async function main(): Promise<number> {
     return 0;
   }
   const { run } = await import('./commands.ts');
-  return run(argv, { script: fileURLToPath(import.meta.url), node: process.execPath, ask: (q) => new Promise<string>((ok) => { const rl = createInterface({ input: process.stdin, output: process.stdout }); rl.question(q, (a) => { rl.close(); ok(a); }); }) });
+  return run(argv, { script: fileURLToPath(import.meta.url), node: process.execPath, tty: process.stdin.isTTY === true && process.stdout.isTTY === true, ask: (q) => new Promise<string>((ok) => { const rl = createInterface({ input: process.stdin, output: process.stdout }); rl.question(q, (a) => { rl.close(); ok(a); }); }) });
 }
 
 main().then((c) => process.exit(c), (e: unknown) => { process.stderr.write(`botwarren-companion: ${(e as Error).message}\n`); process.exit(1); });

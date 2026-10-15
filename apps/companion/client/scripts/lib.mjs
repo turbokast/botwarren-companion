@@ -45,11 +45,14 @@ export async function buildClient({ outDir, keys, version, commit = '', now = Da
   const sri = `sha256-${createHash('sha256').update(loader).digest('base64')}`;
   writeFileSync(join(out, 'index.html'), readFileSync(join(clientRoot, 'index.html'), 'utf8').replace('__LOADER_SRI__', sri));
   cpSync(join(clientRoot, 'static'), out, { recursive: true });
+  // the alert service worker is registered by the page, not run by the loader: its bytes are pinned here so the page can refuse a different copy
+  const swBytes = readFileSync(join(clientRoot, 'static', 'sw.js'));
   const manifest = {
-    schema: 1, kind: 'botwarren-companion-client', version, build: sha(`${jsHash}${cssHash}${loaderHash}`).slice(0, 12),
+    schema: 1, kind: 'botwarren-companion-client', version, build: sha(`${jsHash}${cssHash}${loaderHash}${sha(swBytes)}`).slice(0, 12),
     issued: new Date(now).toISOString(), expires: new Date(now + validDays * 86_400_000).toISOString(), ...(commit ? { commit } : {}),
     entry: { js: { path: jsName, sha256: jsHash, size: app.length, type: 'text/javascript' }, css: { path: cssName, sha256: cssHash, size: css.length, type: 'text/css' } },
     loader: { path: 'loader.js', sha256: loaderHash, size: loader.length },
+    sw: { path: 'sw.js', sha256: sha(swBytes), size: swBytes.length },
   };
   writeFileSync(join(out, 'manifest.json'), JSON.stringify(manifest, null, 2) + '\n');
   return { out, manifest, loaderSri: sri };

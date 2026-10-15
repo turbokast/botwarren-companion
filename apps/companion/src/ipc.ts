@@ -40,3 +40,22 @@ export function connectDaemon(dir: string, env: Record<string, string | undefine
     }));
   });
 }
+
+/**
+ * Waits for a daemon that is being restarted (enrol stops the running one so the service starts it again with the enrolment): first until the old
+ * one has gone (connections fail), then until a new one answers. Resolves with the new daemon's `status`, or null when it did not come back in time.
+ */
+export async function waitForRestart(dir: string, o: { timeoutMs?: number; pollMs?: number; env?: Record<string, string | undefined> } = {}): Promise<Record<string, unknown> | null> {
+  const end = Date.now() + (o.timeoutMs ?? 30_000); const poll = o.pollMs ?? 400;
+  const sleep = (ms: number): Promise<void> => new Promise((ok) => setTimeout(ok, ms));
+  // 1) the old daemon goes away (it stops about 50 ms after it was told to); if it is still there after 5 s, assume it ignored us and carry on
+  const goneBy = Math.min(end, Date.now() + 5000);
+  while (Date.now() < goneBy) { const l = await connectDaemon(dir, o.env); if (!l) break; l.close(); await sleep(poll); }
+  // 2) a daemon answers again
+  while (Date.now() < end) {
+    const l = await connectDaemon(dir, o.env);
+    if (l) { const r = await l.request('status'); l.close(); if (r.ok) return r; }
+    await sleep(poll);
+  }
+  return null;
+}

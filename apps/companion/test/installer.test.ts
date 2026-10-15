@@ -293,6 +293,32 @@ describe('manual install: command, service and uninstall', () => {
     expect(keep).toEqual([['uninstall', '--yes']]);
   });
 
+  it('an update moves a service installed earlier to the new version and restarts it; a service file it did not write is left alone', async () => {
+    const w = world(fixture({ version: '0.1.1', manifestVersion: 5 }), { service: true });
+    const calls: string[] = [];
+    w.opts.runService = (cmd: string, args: string[]) => { calls.push([cmd, ...args].join(' ')); return true; };
+    await install(w.opts);
+    const sp = servicePaths({ os: process.platform, home: w.opts.home, env: w.opts.env });
+    expect(readFileSync(sp.file, 'utf8')).toContain(join('versions', '0.1.1'));
+    // the update is run WITHOUT --service: the unit from the earlier install is still moved over
+    calls.length = 0;
+    const update = (v: string, mv: number): Record<string, unknown> => ({ ...w.opts, service: false, fetchImpl: fakeFetch(fixture({ version: v, manifestVersion: mv })) });
+    const r = await install(update('0.1.2', 6));
+    expect(r.service).toMatchObject({ file: sp.file });
+    const text = readFileSync(sp.file, 'utf8');
+    expect(text).toContain(join('versions', '0.1.2'));
+    expect(text).not.toContain(join('versions', '0.1.1'));
+    if (process.platform === 'linux') expect(calls).toContain('systemctl --user restart botwarren-companion.service');
+    if (process.platform === 'darwin') expect(calls.some((c) => c.startsWith('launchctl kickstart -k'))).toBe(true);
+    // a file of that name that this installer did not write is never rewritten
+    writeFileSync(sp.file, '[Unit]\nDescription=something else entirely\n');
+    calls.length = 0;
+    const r3 = await install(update('0.1.3', 7));
+    expect(r3.service).toBeNull();
+    expect(readFileSync(sp.file, 'utf8')).toBe('[Unit]\nDescription=something else entirely\n');
+    expect(calls).toEqual([]);
+  });
+
   it('service definitions per platform', () => {
     const systemd = serviceText('systemd', '/usr/bin/node', '/h/a b/companion.mjs', '/x/log');
     expect(systemd).toContain('ExecStart="/usr/bin/node" --disable-warning=ExperimentalWarning "/h/a b/companion.mjs" daemon');

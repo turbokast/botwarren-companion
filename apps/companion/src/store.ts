@@ -16,11 +16,26 @@ import { appendFileSync, chmodSync, existsSync, mkdirSync, readFileSync, renameS
 import { join } from 'node:path';
 import { randomBytes } from 'node:crypto';
 import { z } from 'zod';
-import { DEFAULT_PRESETS, DEFAULT_PRESET_TEXT, SignedSchema } from './protocol/index.ts';
+import { DEFAULT_PRESETS, DEFAULT_PRESET_TEXT, PushSub, SignedSchema } from './protocol/index.ts';
 
 export { homeDir, socketPath } from './paths.ts';
 
 export const PolicyMode = z.enum(['off', 'always', 'risky']);
+const Clock = z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/);
+export const AlertsSchema = z.object({
+  /** master switch for phone alerts from this computer (a phone also has its own "Alerts" switch) */
+  enabled: z.boolean().default(true),
+  /** also alert when an agent finished and waits for its next instruction */
+  idle: z.boolean().default(false),
+  /** a request must still be waiting after this long before anything is sent */
+  delaySeconds: z.number().int().min(0).max(300).default(15),
+  /** at least this long between two alerts (waiting requests in between are covered by the next one) */
+  minGapSeconds: z.number().int().min(0).max(3600).default(60),
+  maxPerHour: z.number().int().min(1).max(60).default(12),
+  /** this computer's local time; alerts wait until it ends and are sent only if something is still waiting */
+  quiet: z.object({ on: z.boolean().default(false), start: Clock.default('22:00'), end: Clock.default('07:00') }).default({ on: false, start: '22:00', end: '07:00' }),
+}).strict();
+export type AlertsConfig = z.infer<typeof AlertsSchema>;
 export const ConfigSchema = z.object({
   v: z.literal(1).default(1),
   name: z.string().min(1).max(40).default('This computer'),
@@ -35,6 +50,7 @@ export const ConfigSchema = z.object({
   /** how long a PermissionRequest hook waits for a remote answer; 0 = report only, never hold (the safe default until verified live) */
   holdSeconds: z.number().int().min(0).max(600).default(0),
   paused: z.boolean().default(false),
+  alerts: AlertsSchema.default(AlertsSchema.parse({})),
   maxActionsPerMinute: z.number().int().min(1).max(60).default(6),
   maxActionsPerHour: z.number().int().min(1).max(600).default(60),
 }).strict();
@@ -45,6 +61,8 @@ export type Enrollment = z.infer<typeof EnrollmentSchema>;
 
 export const DeviceRecord = z.object({
   id: z.string(), name: z.string(), sig: z.string(), kem: z.string(), kemEpoch: z.number().int().min(0), cert: SignedSchema, pairedAt: z.number(), lastSeen: z.number().nullable(),
+  /** this phone's Web Push subscription, sent by the phone inside the encrypted channel; absent = alerts off for this phone. Treat as a secret: it is the address of that phone. */
+  push: PushSub.optional(),
 }).strict();
 export type DeviceRecord = z.infer<typeof DeviceRecord>;
 

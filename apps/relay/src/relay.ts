@@ -18,6 +18,7 @@ import {
 } from '@botwarren/companion/protocol';
 import { KeyedLimiter, TokenBucket } from './limits.ts';
 import { KillState, fetchKillList, type KillScope } from './kill.ts';
+import { MAX_ALERT_BYTES, deliver, pushOrigin, type VapidKeys } from './webpush.ts';
 
 export interface RelayConfig {
   port: number;
@@ -45,6 +46,17 @@ export interface RelayConfig {
   logSink?: (line: string) => void;
   fetchImpl?: typeof fetch;
   globalKill?: boolean;
+  /** phone alerts: the relay's VAPID key pair (it signs the delivery of alerts the companion sealed). Without it alerts are off and the page does not offer them. */
+  push?: {
+    vapid: VapidKeys;
+    /** RFC 8292 contact, a mailto: or https: URI */
+    subject?: string;
+    /** alerts a host may have delivered per hour (default 30) */
+    perHostPerHour?: number;
+    /** tests only */
+    fetchImpl?: typeof fetch;
+    extraHosts?: RegExp[];
+  };
 }
 
 interface Conn {
@@ -55,10 +67,13 @@ interface Conn {
   host: string;
   pub: Bytes;
   bucket: TokenBucket;
+  /** hosts only: alert deliveries */
+  pushBucket: TokenBucket;
   violations: number;
 }
 
-interface QItem { m: string; raw: string; bytes: number; x: number; acct: string }
+/** `f` = sender and `r` = the signed replace key (see protocol Header.r): a newer frame of the same sender and key supersedes this one */
+interface QItem { m: string; raw: string; bytes: number; x: number; acct: string; f: string; r?: string }
 
 interface PairEntry {
   hostId: string;
@@ -86,6 +101,10 @@ export class Relay {
   private readonly acctBucket = new KeyedLimiter(120, 10);
   private readonly ipConnect = new KeyedLimiter(20, 20 / 60);
   private readonly ipPair = new KeyedLimiter(10, 10 / 60);
+  private readonly ipKey = new KeyedLimiter(30, 30 / 60);
+  private readonly acctPush = new KeyedLimiter(30, 30 / 3600);
+  /** ops switch for alerts without removing the secrets (POST /admin/push) */
+  pushOff = false;
   private timers: NodeJS.Timeout[] = [];
   origin: string;
 
@@ -139,7 +158,7 @@ export class Relay {
   private securityHeaders(): Record<string, string> {
     const ws = this.origin.replace(/^http/, 'ws');
     return {
-      'content-security-policy': `default-src 'none'; script-src 'self' blob:; style-src 'self' blob:; img-src 'self' data:; manifest-src 'self'; connect-src 'self' ${ws}; frame-ancestors 'none'; base-uri 'none'; form-action 'none'`,
+      'content-security-policy': `default-src 'none'; script-src 'self' blob:; worker-src 'self'; style-src 'self' blob:; img-src 'self' data:; manifest-src 'self'; connect-src 'self' ${ws}; frame-ancestors 'none'; base-uri 'none'; form-action 'none'`,
       'x-content-type-options': 'nosniff', 'referrer-policy': 'no-referrer', 'x-frame-options': 'DENY', 'cross-origin-opener-policy': 'same-origin',
       'cross-origin-resource-policy': 'same-origin', 'permissions-policy': 'camera=(self), microphone=(), geolocation=(), payment=()', 'x-robots-tag': 'noindex, nofollow',
     };
@@ -163,6 +182,7 @@ export class Relay {
       if (p === '/healthz') return this.send(res, 200, { ok: true });
       if (p.startsWith('/admin/')) return await this.admin(req, res, p);
       if (p.startsWith('/v1/pair/')) return await this.pairHttp(req, res, p, url);
+      if (p === '/v1/push/key' && req.method === 'GET') return this.pushKey(req, res);
       if (req.method === 'GET' || req.method === 'HEAD') return this.serveStatic(req, res, p);
       return this.send(res, 404, { error: 'not_found' });
     } catch { if (!res.headersSent) this.send(res, 500, { error: 'failed' }); }
@@ -191,6 +211,13 @@ export class Relay {
     if (p === '/admin/stats' && req.method === 'GET') {
       return this.send(res, 200, { connections: this.conns.size, queuedFrames: [...this.queues.values()].reduce((n, q) => n + q.length, 0), pairing: this.pairs.size, counters: Object.fromEntries(this.counters), kill: { global: this.kill.global, accounts: this.kill.accounts.size, hosts: this.kill.hosts.size, devices: this.kill.devices.size, seq: this.kill.seq } });
     }
+    if (p === '/admin/push' && req.method === 'POST') {
+      let j: { on?: unknown };
+      try { j = JSON.parse((await this.readBody(req, 512)) ?? '') as typeof j; } catch { return this.send(res, 400, { error: 'invalid' }); }
+      if (typeof j.on !== 'boolean') return this.send(res, 400, { error: 'invalid' });
+      this.pushOff = !j.on; this.count(j.on ? 'admin_push_on' : 'admin_push_off');
+      return this.send(res, 200, { ok: true, configured: !!this.cfg.push, on: !this.pushOff });
+    }
     if ((p === '/admin/kill' || p === '/admin/unkill') && req.method === 'POST') {
       const body = await this.readBody(req, 2048);
       let j: { scope?: unknown; id?: unknown };
@@ -207,6 +234,13 @@ export class Relay {
 
   private enforceKills(): void {
     for (const c of [...this.conns.values()]) if (this.kill.blocked(c.acct, c.host, c.role === 'device' ? c.id : undefined)) { this.count('kill_close'); this.closeConn(c, 4403, 'killed'); }
+  }
+
+  /** the public application server key a phone subscribes with; 404 when alerts are not configured or switched off */
+  private pushKey(req: IncomingMessage, res: ServerResponse): void {
+    if (!this.cfg.push || this.pushOff || this.kill.global) return this.send(res, 404, { error: 'not_found' });
+    if (!this.ipKey.take(this.ip(req), this.now())) { this.count('push_key_rate_limited'); return this.send(res, 429, { error: 'rate_limited' }, { 'retry-after': '30' }); }
+    return this.send(res, 200, { key: this.cfg.push.vapid.publicKey });
   }
 
   // ------------------------------------------------------------------ pairing rendezvous (unauthenticated device side, rate limited)
@@ -314,7 +348,7 @@ export class Relay {
     // a newer connection from the same key replaces the older one
     const old = this.conns.get(id);
     if (old) { this.count('conn_replaced'); this.closeConn(old, 4409, 'replaced'); }
-    const conn: Conn = { ws, role: msg.role, id, acct, host, pub, bucket: new TokenBucket(20, 2, now), violations: 0 };
+    const conn: Conn = { ws, role: msg.role, id, acct, host, pub, bucket: new TokenBucket(20, 2, now), pushBucket: new TokenBucket(5, 1 / 30, now), violations: 0 };
     this.conns.set(id, conn);
     if (conn.role === 'device') { let s = this.devicesOfHost.get(host); if (!s) this.devicesOfHost.set(host, (s = new Set())); s.add(conn); }
     this.count(`auth_ok_${conn.role}`);
@@ -351,6 +385,7 @@ export class Relay {
     }
     switch (msg.t) {
       case 'msg': return this.onFrame(c, msg, now);
+      case 'push': return this.onPush(c, msg, now);
       case 'ack': {
         if (typeof msg.m === 'string') { const q = this.queues.get(c.id); if (q) { const i = q.findIndex((x) => x.m === msg.m); if (i >= 0) this.dequeue(c.id, q, i); } }
         return;
@@ -403,15 +438,56 @@ export class Relay {
     const q = this.queues.get(header.t) ?? [];
     const maxFrames = this.cfg.maxQueueFrames ?? 100; const maxBytes = this.cfg.maxQueueBytes ?? 512 * 1024;
     const acctMax = this.cfg.maxAcctQueuedFrames ?? 400;
+    // newest wins per (sender, replace key): the older queued frame is superseded, not stacked (the key is in the signed header and says nothing about content)
+    if (header.r) for (let i = q.length - 1; i >= 0; i--) if (q[i]!.f === header.f && q[i]!.r === header.r) { this.dequeue(header.t, q, i); this.count('queue_replaced'); }
     if ((this.acctQueued.get(c.acct) ?? 0) >= acctMax) return void this.reject(c, 'quota');
-    q.push({ m: header.m, raw, bytes, x: Math.min(header.x, now + this.ttl), acct: c.acct });
+    q.push({ m: header.m, raw, bytes, x: Math.min(header.x, now + this.ttl), acct: c.acct, f: header.f, ...(header.r ? { r: header.r } : {}) });
     this.acctQueued.set(c.acct, (this.acctQueued.get(c.acct) ?? 0) + 1);
     let total = q.reduce((n, x) => n + x.bytes, 0);
-    while (q.length > maxFrames || total > maxBytes) { total -= q[0]!.bytes; this.dequeue(header.t, q, 0); this.count('queue_overflow'); }
+    // over capacity: drop the oldest frame that has no replace key first (the keyed one is already the newest of its kind), then the oldest of all
+    while (q.length > maxFrames || total > maxBytes) {
+      const i = Math.max(0, q.findIndex((x) => !x.r && x.m !== header.m));
+      total -= q[i]!.bytes; this.dequeue(header.t, q, i); this.count('queue_overflow');
+    }
     this.queues.set(header.t, q);
     this.count('frames');
     const dest = this.conns.get(header.t);
     if (dest) dest.ws.send(raw);
+  }
+
+  /**
+   * `{t:'push', q, ep, body, ttl?, urgency?, topic?}` from a host: deliver an alert the host sealed for one phone's push subscription. `q` is echoed in
+   * the answer `{t:'push_result', q, ok, gone?, why?}`. The relay checks shape, destination and rate; it cannot look inside `body`.
+   */
+  private async onPush(c: Conn, msg: Record<string, unknown>, now: number): Promise<void> {
+    if (c.role !== 'host') return void this.count('push_wrong_role');
+    const q = typeof msg.q === 'string' && /^[A-Za-z0-9_-]{1,16}$/.test(msg.q) ? msg.q : '';
+    const answer = (r: { ok: boolean; gone?: boolean; why?: string }): void => { try { c.ws.send(JSON.stringify({ t: 'push_result', q, ...r })); } catch { /* closed */ } };
+    const cfg = this.cfg.push;
+    if (!cfg || this.pushOff) { this.count('push_off'); return answer({ ok: false, why: 'disabled' }); }
+    if (!q || typeof msg.ep !== 'string' || typeof msg.body !== 'string' || msg.body.length > Math.ceil((MAX_ALERT_BYTES * 4) / 3) + 4 || !/^[A-Za-z0-9_-]+$/.test(msg.body)) { this.count('push_malformed'); return answer({ ok: false, why: 'malformed' }); }
+    if (!pushOrigin(msg.ep, cfg.extraHosts)) { this.count('push_bad_endpoint'); return answer({ ok: false, why: 'bad_endpoint' }); } // not a push service: refused before it costs a token
+    const body = unb64u(msg.body);
+    const hourly = cfg.perHostPerHour ?? 30;
+    if (!c.pushBucket.take(now) || !this.acctPush.take(c.acct, now) || this.pushThisHour(c.id, now) >= hourly) { this.count('push_rate_limited'); return answer({ ok: false, why: 'rate_limited' }); }
+    const ttl = typeof msg.ttl === 'number' && Number.isFinite(msg.ttl) ? Math.min(3600, Math.max(60, Math.floor(msg.ttl))) : 600;
+    const urgency = msg.urgency === 'high' || msg.urgency === 'normal' || msg.urgency === 'low' || msg.urgency === 'very-low' ? msg.urgency : 'high';
+    const r = await deliver(msg.ep, body, {
+      vapid: cfg.vapid, subject: cfg.subject ?? 'mailto:support@turbokast.com', ttl, urgency, ...(typeof msg.topic === 'string' ? { topic: msg.topic } : {}),
+      ...(cfg.fetchImpl ? { fetchImpl: cfg.fetchImpl } : {}), ...(cfg.extraHosts ? { extraHosts: cfg.extraHosts } : {}), now: () => this.now(),
+    });
+    if (r.ok) { this.count('push_sent'); return answer({ ok: true }); }
+    this.count(r.gone ? 'push_gone' : `push_failed_${r.why}`);
+    return answer(r.gone ? { ok: false, gone: true } : { ok: false, why: r.why });
+  }
+
+  private readonly pushLog = new Map<string, number[]>();
+  private pushThisHour(host: string, now: number): number {
+    const l = (this.pushLog.get(host) ?? []).filter((t) => now - t < 3_600_000);
+    l.push(now);
+    this.pushLog.set(host, l);
+    if (this.pushLog.size > 5000) this.pushLog.delete(this.pushLog.keys().next().value as string);
+    return l.length - 1;
   }
 
   private reject(c: Conn, code: string): void {

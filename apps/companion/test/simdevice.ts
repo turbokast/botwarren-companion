@@ -4,7 +4,7 @@
  */
 import {
   KemKeyring, ReplayGuard, SendCounter, b64u, derivePairKeys, generateIdentity, openMessage, openOffer, openResult, parseCode, sealMessage, sealRequest, shortAuthString, unb64u, verifyDeviceCert,
-  type ActionData, type Frame, type Identity, type Signed, type StateData,
+  type ActionData, type Frame, type Identity, type PushAckData, type PushSub, type Signed, type StateData,
 } from '../src/protocol/index.ts';
 import { RelayConnection } from '../src/link/connection.ts';
 
@@ -22,6 +22,9 @@ export class SimDevice {
   states: StateData[] = [];
   results: { rid: string; outcome: string; note?: string }[] = [];
   kinds: string[] = [];
+  acks: PushAckData[] = [];
+  /** the header of every frame received (the relay's view: no content) */
+  headers: { r?: string; n: number }[] = [];
   revoked = false;
   online = false;
   clock: () => number = () => Date.now();
@@ -77,7 +80,10 @@ export class SimDevice {
     const hostId = await (await import('../src/protocol/index.ts')).idOf(this.hostSig);
     const r = await openMessage(f, { me: { id: this.id.id, ring: this.ring }, senderKey: (id) => (id === hostId ? this.hostSig : null), guard: this.guard, now: this.clock() });
     if (!r.ok) return;
+    const hd = (await import('../src/protocol/index.ts')).peekHeader(f);
+    if (hd) this.headers.push({ n: hd.header.n, ...(hd.header.r ? { r: hd.header.r } : {}) });
     this.kinds.push(r.msg.kind);
+    if (r.msg.kind === 'pushack') this.acks.push(r.msg.data as PushAckData);
     if (r.msg.kind === 'state') this.states.push(r.msg.data as StateData);
     else if (r.msg.kind === 'result') this.results.push(r.msg.data as { rid: string; outcome: string });
     else if (r.msg.kind === 'revoked') this.revoked = true;
@@ -93,6 +99,9 @@ export class SimDevice {
     this.conn!.sendFrame(frame);
     return frame;
   }
+
+  /** turns alerts on (a subscription) or off (null) for this phone, exactly as the page does */
+  async registerAlerts(sub: PushSub | null): Promise<void> { await this.send('push', sub ? { on: true, sub } : { on: false }); }
 
   async act(a: Omit<ActionData, 'nonce'> & { nonce?: string }, now = this.clock()): Promise<Frame> {
     return this.send('action', { nonce: Math.random().toString(36).slice(2, 12).padEnd(8, 'x'), ...a }, now);

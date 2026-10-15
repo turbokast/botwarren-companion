@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import { mkdtempSync, writeFileSync, mkdirSync } from 'node:fs';
 import { request } from 'node:http';
+import { createPublicKey, verify } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
@@ -9,6 +10,7 @@ import {
 } from '@botwarren/companion/protocol';
 import { ACCT, makeWorld } from './kit.ts';
 import { RelayConnection } from '../../companion/src/link/connection.ts';
+import { generateVapidKeys } from '../src/webpush.ts';
 
 
 /** a raw upgrade attempt (fetch forbids setting the Connection header); resolves with the HTTP status the relay answered */
@@ -401,6 +403,194 @@ describe('relay: static client and headers', () => {
     expect((await fetch(`${base}/nope`)).status).toBe(404);
     expect((await fetch(`${base}/healthz`)).status).toBe(200);
     expect((await fetch(`${base}/`, { method: 'POST' })).status).toBe(404);
+  });
+});
+
+describe('relay: replace key (a phone that was away gets the newest state, not a pile)', () => {
+  const seal = (w: NonNullable<typeof world>, from: Identity, to: { id: Identity; ring: { current: { pair: { pub: Uint8Array } } } }, seq: number, kind: string, replace?: string) =>
+    sealMessage({ from, to: { id: to.id.id, kemPub: to.ring.current.pair.pub, epoch: 0 }, seq, now: w.now(), ttlMs: 600_000, kind, data: { seq }, ...(replace ? { replace } : {}) });
+  const queueOf = (w: NonNullable<typeof world>, id: string) => (w.relay as unknown as { queues: Map<string, { m: string; r?: string; f: string }[]> }).queues.get(id) ?? [];
+
+  it('a newer frame with the same key supersedes the queued one; frames with no key or another key stay; the device gets the newest on connect', async () => {
+    world = await makeWorld();
+    const w = world;
+    const dev = await w.addDevice();
+    const h = w.connect(w.host, 'host');
+    await w.until(() => h.conn.online);
+    for (let i = 1; i <= 5; i++) h.conn.sendFrame(await seal(w, w.host.id, dev, i, 'state', 's'));
+    h.conn.sendFrame(await seal(w, w.host.id, dev, 6, 'result'));
+    h.conn.sendFrame(await seal(w, w.host.id, dev, 7, 'other', 'x'));
+    await w.until(() => w.relay.counters.get('frames') === 7);
+    expect(queueOf(w, dev.id.id)).toHaveLength(3);
+    expect(w.relay.counters.get('queue_replaced')).toBe(4);
+    expect(w.relay.counters.get('queue_overflow') ?? 0).toBe(0);
+
+    const d = w.connect(dev, 'device');
+    await w.until(() => d.frames.length === 3);
+    expect(d.frames.map((f) => peekHeader(f)!.header.n).sort()).toEqual([5, 6, 7]); // the newest state, the result, the other key
+  });
+
+  it('is part of the signed header: a relay (or anyone) cannot add, change or strip it without breaking the signature', async () => {
+    world = await makeWorld();
+    const w = world;
+    const dev = await w.addDevice();
+    const h = w.connect(w.host, 'host');
+    await w.until(() => h.conn.online);
+    const f = await seal(w, w.host.id, dev, 1, 'state');
+    const header = JSON.parse(Buffer.from(f.h, 'base64url').toString('utf8')) as Record<string, unknown>;
+    const forged = { ...f, h: Buffer.from(JSON.stringify({ ...header, r: 's' })).toString('base64url') };
+    h.conn.sendFrame(forged);
+    await w.until(() => w.relay.counters.get('frame_bad_frame') === 1);
+    await expect(seal(w, w.host.id, dev, 2, 'state', 'a key with spaces')).rejects.toThrow();
+    await expect(seal(w, w.host.id, dev, 2, 'state', 'x'.repeat(17))).rejects.toThrow();
+  });
+
+  it('a replace key never replaces another sender\'s frame, and a flood of keyed frames stays at one queued frame', async () => {
+    world = await makeWorld();
+    const w = world;
+    const dev = await w.addDevice();
+    const h = w.connect(w.host, 'host');
+    const d = w.connect(dev, 'device');
+    await w.until(() => h.conn.online && d.conn.online);
+    d.conn.stop();
+    await new Promise((r) => setTimeout(r, 50));
+    for (let i = 1; i <= 15; i++) h.conn.sendFrame(await seal(w, w.host.id, dev, i, 'state', 's'));
+    await w.until(() => w.relay.counters.get('frames') === 15);
+    expect(queueOf(w, dev.id.id).filter((x) => x.r === 's')).toHaveLength(1);
+    const stats = (await (await fetch(`http://127.0.0.1:${w.port}/admin/stats`, { headers: { authorization: 'Bearer admintoken-for-tests' } })).json()) as { queuedFrames: number; counters: Record<string, number> };
+    expect(stats.queuedFrames).toBe(1);
+    expect(stats.counters.queue_overflow ?? 0).toBe(0);
+  });
+
+  it('when the queue is over capacity the oldest UNKEYED frame goes first: the newest state survives', async () => {
+    world = await makeWorld({ maxQueueFrames: 3 });
+    const w = world;
+    const dev = await w.addDevice();
+    const h = w.connect(w.host, 'host');
+    await w.until(() => h.conn.online);
+    h.conn.sendFrame(await seal(w, w.host.id, dev, 1, 'state', 's'));
+    for (let i = 2; i <= 6; i++) h.conn.sendFrame(await seal(w, w.host.id, dev, i, 'result'));
+    await w.until(() => w.relay.counters.get('frames') === 6);
+    const q = queueOf(w, dev.id.id);
+    expect(q).toHaveLength(3);
+    expect(q.filter((x) => x.r === 's')).toHaveLength(1); // the state frame, although it is the oldest
+    expect(w.relay.counters.get('queue_overflow')).toBe(3);
+  });
+});
+
+describe('relay: phone alerts (a courier for ciphertext)', () => {
+  type Post = { url: string; headers: Record<string, string>; body: Buffer; redirect?: string };
+  function pushWorld(over: { status?: number; perHostPerHour?: number } = {}) {
+    const posts: Post[] = [];
+    const state = { status: over.status ?? 201 };
+    const vapid = generateVapidKeys();
+    const fetchImpl = (async (url: string | URL | Request, init?: RequestInit) => {
+      posts.push({ url: String(url), headers: init?.headers as Record<string, string>, body: Buffer.from(init?.body as Uint8Array), ...(init?.redirect ? { redirect: init.redirect } : {}) });
+      return new Response(null, { status: state.status });
+    }) as typeof fetch;
+    return { posts, state, vapid, make: () => makeWorld({ push: { vapid, subject: 'mailto:test@example.com', fetchImpl, ...(over.perHostPerHour ? { perHostPerHour: over.perHostPerHour } : {}) } }) };
+  }
+  const ep = 'https://fcm.googleapis.com/fcm/send/abc';
+  const body = Buffer.alloc(170, 7).toString('base64url');
+  const ask = async (w: NonNullable<typeof world>, h: ReturnType<NonNullable<typeof world>['connect']>, q: string, msg: Record<string, unknown>) => {
+    h.conn.send({ t: 'push', q, ...msg });
+    await w.until(() => h.controls.some((c) => c.t === 'push_result' && c.q === q));
+    return h.controls.find((c) => c.t === 'push_result' && c.q === q)!;
+  };
+
+  it('delivers the body unchanged with a VAPID header for the push service\'s origin, does not follow redirects, and reports the result', async () => {
+    const pw = pushWorld(); world = await pw.make();
+    const w = world;
+    const h = w.connect(w.host, 'host');
+    await w.until(() => h.conn.online);
+    expect(await ask(w, h, 'a1', { ep, body, ttl: 600, urgency: 'high', topic: 'bw-waiting' })).toMatchObject({ ok: true });
+    const p = pw.posts[0]!;
+    expect(p.url).toBe(ep);
+    expect(p.redirect).toBe('manual');
+    expect(p.body.equals(Buffer.from(body, 'base64url'))).toBe(true);
+    expect(p.headers).toMatchObject({ ttl: '600', urgency: 'high', topic: 'bw-waiting', 'content-encoding': 'aes128gcm' });
+    const m = /^vapid t=([\w-]+)\.([\w-]+)\.([\w-]+), k=([\w-]+)$/.exec(p.headers.authorization!)!;
+    expect(m[4]).toBe(pw.vapid.publicKey);
+    expect(JSON.parse(Buffer.from(m[2]!, 'base64url').toString())).toMatchObject({ aud: 'https://fcm.googleapis.com', sub: 'mailto:test@example.com' });
+    // the ES256 signature verifies with the public key
+    const pub = createPublicKey({ key: { kty: 'EC', crv: 'P-256', x: Buffer.from(pw.vapid.publicKey, 'base64url').subarray(1, 33).toString('base64url'), y: Buffer.from(pw.vapid.publicKey, 'base64url').subarray(33, 65).toString('base64url') }, format: 'jwk' });
+    expect(verify('sha256', Buffer.from(`${m[1]}.${m[2]}`), { key: pub, dsaEncoding: 'ieee-p1363' }, Buffer.from(m[3]!, 'base64url'))).toBe(true);
+    expect(w.relay.counters.get('push_sent')).toBe(1);
+  });
+
+  it('refuses a destination that is not a real push service, a body that is too big or malformed, and a device asking (no network call is made for any of them)', async () => {
+    const pw = pushWorld(); world = await pw.make();
+    const w = world;
+    const dev = await w.addDevice();
+    const h = w.connect(w.host, 'host');
+    const d = w.connect(dev, 'device');
+    await w.until(() => h.conn.online && d.conn.online);
+    const forbidden = ['http://127.0.0.1:9/x', 'https://127.0.0.1/x', 'https://evil.example/x', 'https://fcm.googleapis.com.evil.example/x', 'https://user:pw@fcm.googleapis.com/x', 'https://fcm.googleapis.com:8443/x', 'file:///etc/passwd', 'ftp://fcm.googleapis.com/x'];
+    for (const [i, bad] of forbidden.entries()) expect(await ask(w, h, `f${i}`, { ep: bad, body }), bad).toMatchObject({ ok: false, why: 'bad_endpoint' });
+    expect(await ask(w, h, 'b2', { ep, body: Buffer.alloc(700).toString('base64url') })).toMatchObject({ ok: false, why: 'malformed' });
+    expect(await ask(w, h, 'b3', { ep, body: 'not base64 !!' })).toMatchObject({ ok: false, why: 'malformed' });
+    expect(await ask(w, h, 'b4', { ep: 5, body })).toMatchObject({ ok: false, why: 'malformed' });
+    d.conn.send({ t: 'push', q: 'd1', ep, body });
+    await w.until(() => w.relay.counters.get('push_wrong_role') === 1);
+    expect(pw.posts).toHaveLength(0);
+  });
+
+  it('rate limits a host, maps 404 and 410 to "gone", and keeps no endpoint or body in counters, logs or stats', async () => {
+    const pw = pushWorld(); world = await pw.make();
+    const w = world;
+    const h = w.connect(w.host, 'host');
+    await w.until(() => h.conn.online);
+    const results: Record<string, unknown>[] = [];
+    for (let i = 0; i < 8; i++) results.push(await ask(w, h, `c${i}`, { ep: `${ep}-CANARY${i}`, body }));
+    expect(results.filter((r) => r.ok === true)).toHaveLength(5); // a burst of 5, then refilled slowly
+    expect(results.filter((r) => r.why === 'rate_limited')).toHaveLength(3);
+    const w2 = await makeWorld({ push: { vapid: pw.vapid, fetchImpl: (async () => new Response(null, { status: 404 })) as typeof fetch } });
+    try {
+      const h2 = w2.connect(w2.host, 'host');
+      await w2.until(() => h2.conn.online);
+      h2.conn.send({ t: 'push', q: 'g1', ep, body });
+      await w2.until(() => h2.controls.some((c) => c.t === 'push_result' && c.gone === true));
+    } finally { await w2.close(); }
+    const stats = await (await fetch(`http://127.0.0.1:${w.port}/admin/stats`, { headers: { authorization: 'Bearer admintoken-for-tests' } })).text();
+    const everything = [w.logs.join('\n'), JSON.stringify([...w.relay.counters]), stats].join('\n');
+    for (const canary of ['CANARY', 'fcm', 'googleapis', body]) expect(everything).not.toContain(canary);
+  });
+
+  it('hourly cap per host, the public key endpoint, and the ops switch', async () => {
+    const pw = pushWorld({ perHostPerHour: 2 }); world = await pw.make();
+    const w = world;
+    const base = `http://127.0.0.1:${w.port}`;
+    expect(await (await fetch(`${base}/v1/push/key`)).json()).toEqual({ key: pw.vapid.publicKey });
+    const h = w.connect(w.host, 'host');
+    await w.until(() => h.conn.online);
+    expect(await ask(w, h, 'h1', { ep, body })).toMatchObject({ ok: true });
+    expect(await ask(w, h, 'h2', { ep, body })).toMatchObject({ ok: true });
+    expect(await ask(w, h, 'h3', { ep, body })).toMatchObject({ ok: false, why: 'rate_limited' });
+    // off at once, without touching the secrets
+    const admin = { headers: { authorization: 'Bearer admintoken-for-tests', 'content-type': 'application/json' } };
+    expect((await fetch(`${base}/admin/push`, { method: 'POST', body: '{"on":false}', ...admin })).status).toBe(200);
+    expect((await fetch(`${base}/v1/push/key`)).status).toBe(404);
+    expect(await ask(w, h, 'h4', { ep, body })).toMatchObject({ ok: false, why: 'disabled' });
+    expect((await fetch(`${base}/admin/push`, { method: 'POST', body: '{"on":"yes"}', ...admin })).status).toBe(400);
+    expect((await fetch(`${base}/admin/push`, { method: 'POST', body: '{"on":false}' })).status).toBe(404); // the admin token is required
+  });
+
+  it('without a VAPID key there is no key endpoint and every request is answered "disabled"', async () => {
+    world = await makeWorld();
+    const w = world;
+    expect((await fetch(`http://127.0.0.1:${w.port}/v1/push/key`)).status).toBe(404);
+    const h = w.connect(w.host, 'host');
+    await w.until(() => h.conn.online);
+    expect(await ask(w, h, 'z1', { ep, body })).toMatchObject({ ok: false, why: 'disabled' });
+  });
+
+  it('the page may run a worker from its own origin (worker-src) and nothing else is allowed in', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'bw-relay-client-')); writeFileSync(join(dir, 'index.html'), '<title>x</title>'); writeFileSync(join(dir, 'sw.js'), 'self.x=1');
+    world = await makeWorld({ clientDir: dir });
+    const r = await fetch(`http://127.0.0.1:${world.port}/sw.js`);
+    expect(r.headers.get('content-type')).toContain('javascript');
+    expect(r.headers.get('cache-control')).toBe('no-store'); // the browser re-checks the worker on every visit
+    expect(r.headers.get('content-security-policy')).toContain("worker-src 'self'");
   });
 });
 

@@ -53,7 +53,7 @@ function sign(file: string, k: { pem: string }, id: string): string {
 describe('component release tooling', () => {
   it('the bundle holds exactly companion.mjs, VERSION, LICENSE and NOTICE, and is reproducible', () => {
     const a = build(); const b = build();
-    const zip = (d: string) => readFileSync(join(d, 'companion-0.1.1.zip'));
+    const zip = (d: string) => readFileSync(join(d, 'companion-0.1.2.zip'));
     expect(zip(a).equals(zip(b))).toBe(true);
     expect(readZip(zip(a)).map((e) => e.name).sort()).toEqual(['LICENSE', 'NOTICE', 'VERSION', 'companion.mjs']);
     expect(readFileSync(join(a, 'manifest.json')).equals(readFileSync(join(b, 'manifest.json')))).toBe(true);
@@ -62,8 +62,8 @@ describe('component release tooling', () => {
   it('assembles the manifest from the build output (counter, epoch, validity), signs it and verifies it like the agent', () => {
     const dir = build(); const k = devKey(); const pinned = [{ id: 'dev-rel', spki: k.spki, dev: true, role: 'component' as const }];
     const first = assembleComponentManifest({ dir, epoch: 1, validDays: 90, now: NOW });
-    expect(first.manifest).toMatchObject({ manifestVersion: 1, epoch: 1, issued: NOW.toISOString(), expires: new Date(NOW.getTime() + 90 * 86_400_000).toISOString(), channels: { stable: '0.1.1' }, blocked: [] });
-    expect(first.manifest.releases['0.1.1'].minAgent).toBe('0.7.0');
+    expect(first.manifest).toMatchObject({ manifestVersion: 1, epoch: 1, issued: NOW.toISOString(), expires: new Date(NOW.getTime() + 90 * 86_400_000).toISOString(), channels: { stable: '0.1.2' }, blocked: [] });
+    expect(first.manifest.releases['0.1.2'].minAgent).toBe('0.7.0');
     const out = mk(); const f1 = join(out, 'manifest.json'); writeFileSync(f1, first.bytes);
     const sig1 = sign(f1, k, 'dev-rel');
     expect(verifyComponentManifest(first.bytes, sig1, { component: 'companion', keys: pinned, now: NOW, allowDev: true, highestSeen: 0, epoch: 1 })).toMatchObject({ ok: true });
@@ -74,7 +74,7 @@ describe('component release tooling', () => {
     const sig2 = sign(f2, k, 'dev-rel');
     const second = assembleComponentManifest({ dir, previous: { bytes: prevBytes, sig: sig2 }, epoch: 1, block: ['0.0.8'], now: new Date(NOW.getTime() + 86_400_000), keys: pinned, allowDev: true });
     expect(second.manifest).toMatchObject({ manifestVersion: 2, blocked: ['0.0.8', '0.0.9'] });
-    expect(() => assembleComponentManifest({ dir, block: ['0.1.1'], now: NOW })).toThrow(/stable version/);
+    expect(() => assembleComponentManifest({ dir, block: ['0.1.2'], now: NOW })).toThrow(/stable version/);
     expect(second.previousVersion).toBe(1);
   }, 60_000);
 
@@ -92,7 +92,7 @@ describe('component release tooling', () => {
     const sig3 = sign(f3, k, 'dev-rel');
     expect(() => assembleComponentManifest({ dir, previous: { bytes: e3b, sig: sig3 }, epoch: 2, now: NOW, keys: pinned, allowDev: true })).toThrow(/lower than/);
     // the zip no longer matches the template
-    const z = join(dir, 'companion-0.1.1.zip'); const zb = readFileSync(z); zb[zb.length - 30] = zb[zb.length - 30]! ^ 1; writeFileSync(z, zb);
+    const z = join(dir, 'companion-0.1.2.zip'); const zb = readFileSync(z); zb[zb.length - 30] = zb[zb.length - 30]! ^ 1; writeFileSync(z, zb);
     expect(() => assembleComponentManifest({ dir, now: NOW })).toThrow(/does not match/);
   }, 60_000);
 });
@@ -108,7 +108,7 @@ const fakeRoot = (): string => {
 };
 const builtClient = async (k: { spki: string }) => {
   const out = join(mk(), 'client'); const keys = [{ id: 'dev-rel', spki: k.spki }];
-  await buildClient({ outDir: out, keys, version: '0.1.1', now: NOW.getTime() });
+  await buildClient({ outDir: out, keys, version: '0.1.2', now: NOW.getTime() });
   return { out, keys };
 };
 
@@ -124,7 +124,7 @@ describe('relay image inputs', () => {
     // nothing else of the repository: not the tests, not the daemon, not the CLI
     expect(names.filter((n) => /test|cli\.ts/.test(n))).toEqual([]);
     const ctx = JSON.parse(readTarGz(a.bytes).find((e) => e.name === 'CONTEXT.json')!.data.toString('utf8'));
-    expect(ctx).toMatchObject({ kind: 'botwarren-relay-context', version: '0.1.1' });
+    expect(ctx).toMatchObject({ kind: 'botwarren-relay-context', version: '0.1.2' });
     // a key that is not the signer: refused
     const other = devKey();
     await expect(makeRelayContext({ root: rootDir, clientDir: out, keys: [{ id: 'dev-rel', spki: other.spki }] })).rejects.toThrow(/does not verify/);
@@ -144,17 +144,17 @@ describe('staging and verifying a whole release (dev key)', () => {
     const work = mk(); const manifest = join(work, 'manifest.json'); writeFileSync(manifest, a.bytes);
     sign(manifest, k, 'dev-rel');
     const out = join(mk(), 'release');
-    // the component zip was built for the same version the client manifest names (0.1.1)
-    const r = await stageRelease({ clientDir: client, componentZip: join(comp, 'companion-0.1.1.zip'), componentManifest: manifest, out, allowDev: true, root: fakeRoot(), keys });
+    // the component zip was built for the same version the client manifest names (0.1.2)
+    const r = await stageRelease({ clientDir: client, componentZip: join(comp, 'companion-0.1.2.zip'), componentManifest: manifest, out, allowDev: true, root: fakeRoot(), keys });
     return { r, out, keys };
   };
 
   it('stages every file, lists it in SHA256SUMS and verifies as a downloader would', async () => {
     const { r, out, keys } = await stage();
-    expect(r.version).toBe('0.1.1');
+    expect(r.version).toBe('0.1.2');
     const v = await verifyReleaseDir({ dir: out, allowDev: true, keys });
-    expect(v).toEqual({ ok: true, problems: [], version: '0.1.1' });
-    expect(readFileSync(join(out, 'SHA256SUMS'), 'utf8').trim().split('\n').map((l) => l.split('  ')[1])).toEqual(['client-0.1.1.tar.gz', 'client-manifest.json', 'client-manifest.json.sig', 'companion-0.1.1.zip', 'component-manifest.json', 'component-manifest.json.sig', 'install.ps1', 'install.sh', 'relay-context-0.1.1.tar.gz']);
+    expect(v).toEqual({ ok: true, problems: [], version: '0.1.2' });
+    expect(readFileSync(join(out, 'SHA256SUMS'), 'utf8').trim().split('\n').map((l) => l.split('  ')[1])).toEqual(['client-0.1.2.tar.gz', 'client-manifest.json', 'client-manifest.json.sig', 'companion-0.1.2.zip', 'component-manifest.json', 'component-manifest.json.sig', 'install.ps1', 'install.sh', 'relay-context-0.1.2.tar.gz']);
   }, 120_000);
 
   it('stages the manual installers and refuses a release whose installers do not embed the pinned production key', async () => {
@@ -179,7 +179,7 @@ describe('staging and verifying a whole release (dev key)', () => {
 
   it('rejects a release with a changed file, a wrong key, an extra file or a dev signature under production keys', async () => {
     const { out, keys } = await stage();
-    const clean = readFileSync(join(out, 'companion-0.1.1.zip'));
+    const clean = readFileSync(join(out, 'companion-0.1.2.zip'));
     // wrong key: neither signature verifies
     const other = devKey();
     expect((await verifyReleaseDir({ dir: out, allowDev: true, keys: [{ id: 'dev-rel', spki: other.spki }] })).problems.join()).toMatch(/does not verify/);
@@ -188,10 +188,10 @@ describe('staging and verifying a whole release (dev key)', () => {
     expect((await verifyReleaseDir({ dir: out, allowDev: true, keys })).problems.join()).toMatch(/SHA256SUMS lists/);
     rmSync(join(out, 'extra.txt'));
     // a changed byte in the zip: the hash list no longer matches
-    const bad = Buffer.from(clean); bad[bad.length - 30] = bad[bad.length - 30]! ^ 1; writeFileSync(join(out, 'companion-0.1.1.zip'), bad);
-    expect((await verifyReleaseDir({ dir: out, allowDev: true, keys })).problems.join()).toMatch(/companion-0\.1\.1\.zip: hash does not match/);
+    const bad = Buffer.from(clean); bad[bad.length - 30] = bad[bad.length - 30]! ^ 1; writeFileSync(join(out, 'companion-0.1.2.zip'), bad);
+    expect((await verifyReleaseDir({ dir: out, allowDev: true, keys })).problems.join()).toMatch(/companion-0\.1\.2\.zip: hash does not match/);
     // production keys only (the pinned set, no dev key): the dev-signed release is refused
-    writeFileSync(join(out, 'companion-0.1.1.zip'), clean);
+    writeFileSync(join(out, 'companion-0.1.2.zip'), clean);
     expect((await verifyReleaseDir({ dir: out })).ok).toBe(false);
   }, 120_000);
 });

@@ -1,6 +1,6 @@
 {
   "name": "@botwarren/relay",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "Botwarren Companion relay: carries end-to-end encrypted frames between a user's machine and their paired devices. Cannot read or forge them.",
   "license": "Apache-2.0",
   "private": true,

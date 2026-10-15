@@ -30,5 +30,6 @@ RUN useradd --uid 10001 --create-home relay
 USER relay
 EXPOSE 8080
 # Configuration is environment only (secrets are never baked into the image): RELAY_ORIGIN, RELAY_TICKET_KEYS (required); RELAY_ADMIN_TOKEN,
-# RELAY_KILLLIST_URL, RELAY_GLOBAL_KILL, RELAY_TRUST_FLY_PROXY (optional). No volume: the relay stores nothing durable.
+# RELAY_KILLLIST_URL, RELAY_GLOBAL_KILL, RELAY_TRUST_FLY_PROXY, RELAY_VAPID_PUBLIC_KEY, RELAY_VAPID_PRIVATE_KEY, RELAY_VAPID_SUBJECT (optional; the last three are
+# phone alerts). No volume: the relay stores nothing durable.
 CMD ["node", "--disable-warning=ExperimentalWarning", "apps/relay/src/main.ts"]

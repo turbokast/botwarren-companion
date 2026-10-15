@@ -62,7 +62,7 @@ Every pairing attempt (offer made, request seen, accepted, rejected, expired) is
 
 ```
 frame  = { "t":"msg", "h": b64u(header), "c": b64u(ciphertext), "s": b64u(signature) }
-header = { "v":1, "f":<from id>, "t":<to id>, "n":<seq>, "ts":<ms>, "x":<expiry ms>, "ep":<recipient key epoch>, "m":<msg id, 12 random bytes b64u> }
+header = { "v":1, "f":<from id>, "t":<to id>, "n":<seq>, "ts":<ms>, "x":<expiry ms>, "ep":<recipient key epoch>, "m":<msg id, 12 random bytes b64u>, "r":<optional replace key> }
 c      = enc(32 bytes, HPKE encapsulated key) || AES-256-GCM ciphertext
 s      = Ed25519_sender( "botwarren-link-v1/msg\0" || header bytes || c )
 ```
@@ -73,11 +73,12 @@ s      = Ed25519_sender( "botwarren-link-v1/msg\0" || header bytes || c )
 * **Order of checks at the receiver:** header parse, `t` is me, `f` is a known and not revoked peer, signature valid, `x` not past and `ts` not in the future (skew allowance 120 s), `n` strictly greater than the highest accepted from that sender, then HPKE open (epoch key available), then inner checks. Only after all of that is the highest-seen counter advanced and the message acted on.
 * **Replay protection.** `n` is a per-direction counter, persisted. The host persists it in blocks of 100 so a crash cannot reuse numbers. A device that loses its storage (browser eviction) is a new device and must re-pair. Duplicate or lower `n`: dropped silently and counted. Relay delivery is at-least-once, so duplicates are expected and harmless.
 * **No reflection.** The `t` field is bound in the AAD and signature, so a message to the host cannot be replayed to a device.
+* **Replace key (0.1.2).** `r` is optional: an opaque label of 1 to 16 characters of `[A-Za-z0-9_-]` chosen by the sender. It is part of the signed header, so nobody can add, change or strip it unnoticed, and it says nothing about the content. The relay may drop an older *queued* frame of the same sender and recipient that carries the same key when a newer one arrives, so a device that was away finds the newest state instead of a pile of old ones. The computer uses `s` on every `state` frame and `a` on every `pushack`; `result`, `keyupdate` and `revoked` carry no key and are never replaced. Receivers ignore the field (a relay or device from before 0.1.2 simply does not replace). The replay counter `n` stays strictly increasing, so a skipped number is harmless.
 
 ### Inner message kinds (v1)
 
-Host to device: `state` (full snapshot, small), `result` (outcome of an action), `keyupdate`, `revoked`.
-Device to host: `action`, `sync` (please send `state`), `keyupdate`.
+Host to device: `state` (full snapshot, small), `result` (outcome of an action), `keyupdate`, `revoked`, `pushack` (0.1.2: whether the computer holds this phone's alert subscription).
+Device to host: `action`, `sync` (please send `state`), `keyupdate`, `push` (0.1.2: turn phone alerts on with a Web Push subscription, or off).
 
 `state.d`:
 ```
@@ -93,6 +94,10 @@ Device to host: `action`, `sync` (please send `state`), `keyupdate`.
 { rid, sid, a:"approve"|"deny"|"reply", opt?:<presetId or optionId>, bind, nonce }
 ```
 The device echoes `bind` of what it displayed. The host refuses (`stale`) if the pending request no longer matches, so the user can never approve something other than what they saw.
+
+`push.d` (device to host, strict): `{ on: true, sub: { endpoint: <https URL, at most 1024>, p256dh: <b64u>, auth: <b64u> } }` or `{ on: false }`. The subscription is the phone's own Web Push subscription; it reaches the computer only inside this encrypted message. `pushack.d`: `{ on: bool, why?: "ok"|"off"|"host_off"|"rejected" }`; the computer answers every `push` and every `sync` with one.
+
+An **alert** is not a message of this protocol: when a request starts waiting, the computer seals `{"v":1,"k":"waiting","r":<request id>}` (the request id is random and means nothing outside the computer) for the subscription's keys with RFC 8291 (`aes128gcm`, ECDH P-256, HKDF-SHA-256) and hands the ciphertext to the relay (section 7, item 11). When and how often: [ALERTS.md](ALERTS.md).
 
 ## 6. Host-side checks for an action (the companion decides, not the client)
 
@@ -113,10 +118,11 @@ WebSocket at `/v1/ws`. Max frame 16 KiB.
 3. Relay verifies: ticket signature with a pinned server key and not expired; for a device the cert is signed by the ticket's host key and matches `acct`/`host`; the auth signature proves the key; account, host and device are not on the kill list; global kill switch off. Else `{"t":"error","code":...}` and close.
 4. `← {"t":"ready","peerOnline":bool,"queued":n}`.
 5. `→ {"t":"msg", h,c,s}`: the relay checks `f == authed id`, size, expiry, and that the Ed25519 signature verifies under the sender's key (so a connection cannot inject frames as someone else). A device may only address its own host (`t == cert.host`). A host may address any id (the relay cannot yet know its devices), but each host has a queue quota. The relay does not and cannot decrypt.
-6. Delivery: to the connected recipient immediately, otherwise queued in memory with a TTL (default 15 minutes, max 100 frames and 512 KiB per recipient, shorter `x` wins). Recipient sends `{"t":"ack","m":<msg id>}`; unacked frames are redelivered on reconnect until the TTL.
+6. Delivery: to the connected recipient immediately, otherwise queued in memory with a TTL (default 15 minutes, max 100 frames and 512 KiB per recipient, shorter `x` wins). Recipient sends `{"t":"ack","m":<msg id>}`; unacked frames are redelivered on reconnect until the TTL. A frame whose signed header carries a replace key supersedes the queued frame of the same sender with the same key. When the queue is over capacity the oldest frame **without** a key is dropped first (a keyed frame is already the newest of its kind), then the oldest of all.
 7. `{"t":"presence","host":bool}` to devices when the host connects or disconnects (the only relay-originated information).
 8. Pairing rendezvous: `POST /v1/pair/offer` (host, authenticated by the same chain in headers), `GET /v1/pair/<rid>`, `POST /v1/pair/<rid>/request`, `GET /v1/pair/<rid>/result` (long poll). Unknown, expired or consumed rids all return the same 404.
 9. Operations: `GET /healthz` (no state), `POST /admin/kill` and `/admin/unkill` with a bearer token from the environment: `{scope:"global"|"account"|"host"|"device", id}`; a signed kill list fetched from botwarren.com every 30 s (`RELAY_KILLLIST_URL`, verified with the ticket keys) as the durable source; kill closes live sockets at once.
+11. Alerts (0.1.2): `→ {"t":"push","q":<id>,"ep":<push endpoint>,"body":<b64u, at most 600 bytes decoded>,"ttl"?:<60 to 3600>,"urgency"?:...,"topic"?:...}` from a host. The relay checks the shape, that `ep` is an https URL of a real browser push service (`fcm.googleapis.com`, `*.push.services.mozilla.com`, `*.push.apple.com`, `*.notify.windows.com`; default port, no credentials; nothing else is ever called, redirects are not followed), and the rate (a burst of 5 then one per 30 s, 30 an hour per host, 30 an hour per account), then POSTs the body **unchanged** with a VAPID header (RFC 8292, ES256, `aud` = the push service origin) and answers `{"t":"push_result","q":<id>,"ok":bool,"gone"?:bool,"why"?:...}`; `gone` (404 or 410) tells the computer to drop that subscription. `GET /v1/push/key` returns the relay's public application server key `{"key":...}` (404 when alerts are not configured or switched off). `POST /admin/push {"on":bool}` is the ops switch. The relay has no way to read `body`: the computer sealed it for the phone's keys.
 10. Limits: per connection 20 frames a second burst, 120 a minute; per account 600 frames a minute and 3 hosts and 8 devices connected; per IP 10 pairing requests a minute; global connection cap. `Retry` information is returned in `error` frames.
 
 **What the relay logs:** event counters, error codes, connection counts. Never a frame body, a header field, an id, a name, an IP address beyond the transient rate-limit key in memory, or a ticket. A test plants canaries in every field and fails if one reaches logs or storage.
@@ -132,8 +138,9 @@ WebSocket at `/v1/ws`. Max frame 16 KiB.
 
 | Party | Sees | Cannot see |
 |---|---|---|
-| Relay operator (and its hosting provider, and Cloudflare) | Connection times and IPs (transient), key-derived ids, pseudonymous account tag, device labels in certs, message counts, size buckets, who is online | Content of any message; the plaintext label of a project; the GitHub/GitLab identity (only a keyed pseudonym) |
-| botwarren.com | That an account is enabled and consented; ticket issuance events; admin audit | Keys, devices, messages, anything about agents beyond what the metadata-only ship agent already reports |
+| Relay operator (and its hosting provider, and Cloudflare) | Connection times and IPs (transient), key-derived ids, pseudonymous account tag, device labels in certs, message counts, size buckets, who is online; with alerts on: when a host asked for an alert to be delivered and to which push endpoint URL | Content of any message; the plaintext label of a project; the GitHub/GitLab identity (only a keyed pseudonym) |
+| botwarren.com | That an account is enabled and consented; ticket issuance events; admin audit | Keys, devices, messages, alerts (it is not in their path), anything about agents beyond what the metadata-only ship agent already reports |
+| A browser push service (Google, Apple, Mozilla, Microsoft; only if the person turned alerts on) | That a sealed message of under 600 bytes was delivered to a phone's push endpoint, when, with TTL, urgency and the topic `bw-waiting` | The content (sealed on the computer with the phone's own keys), and which relay account or agent it concerns |
 | Cloudflare edge | TLS-terminated traffic of the relay hostname: ciphertext and the same metadata | Content |
 | A network observer | Endpoint, timing, sizes | Content, ids |
 | The user's agent vendor | Unchanged (they already see the session) | n/a |
@@ -151,6 +158,8 @@ WebSocket at `/v1/ws`. Max frame 16 KiB.
 | T7 | Content reaching public projections, logs, backups | A program separate from the metadata-only ship agent, relay stores nothing durable, canary tests on the relay | Operator mistakes; backups exclude relay volume |
 | T8 | Copy drift | Wording updates in README, trust page and privacy page in the same change; ship agent unchanged and tested | Future edits |
 | T9 | Ship agent turned into an installer for arbitrary code | The agent installs only a component named `companion` from a manifest signed by a pinned component key (a separate key set from the agent's update keys, which the component verifier refuses) with its own domain, hash-checked before extraction, with recorded consent, a local log line and a notice; the cloud's only instruction is a fixed enum | Compromise of the component signing key (it can sign a component, not an agent update: the agent-update verifier rejects it; mitigated by KMS, a gated workflow, recovery-key revocation, epochs) |
+| T10 | A relay, push service or botwarren.com reads or forges phone alerts | The computer seals each alert with RFC 8291 for the phone's own keys, which reach it only through the end-to-end channel; the payload is exactly `{v,k,r}` (strict schema; the relay refuses a body over 600 bytes); the service worker shows fixed words and takes only a validated random id from it; botwarren.com is not in the path | They learn *when* an agent started waiting (timing) and the push endpoint; they can withhold or replay an alert |
+| T11 | The alert service worker used to keep a malicious client on a phone | No handler for network requests; its bytes are pinned by SHA-256 in the signed manifest and the page refuses a different copy; the scope is the relay's own cookie-less origin; browsers re-check a worker at least every 24 h | A malicious relay can serve a different worker on an update check, as it could serve a different page (T3): the same accepted risk, not a larger one |
 | T10 | Relay abuse and DoS | Rate limits, quotas, kill switches | Availability only |
 | T11 | Replay, reflection, re-wrapping | Counters, expiry, `t` in AAD and signature, inner id equality, one-time `rid` | Counter loss on a device re-pairs it |
 | T12 | Local attacker on the dev machine | The companion socket is 0600 in a 0700 directory; hook calls need the per-install secret; no network listener; same OS user can already do everything, out of scope | Same-user malware |

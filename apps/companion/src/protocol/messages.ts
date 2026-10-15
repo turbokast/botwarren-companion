@@ -76,8 +76,31 @@ export type KeyUpdateData = z.infer<typeof KeyUpdateData>;
 export const RevokedData = z.object({ reason: z.enum(['removed', 'account_off']) }).strict();
 export const SyncData = z.object({}).strict();
 
-export const HOST_KINDS = ['state', 'result', 'keyupdate', 'revoked'] as const;
-export const DEVICE_KINDS = ['action', 'sync', 'keyupdate'] as const;
+/**
+ * Phone alerts (v1.1). The device registers its own Web Push subscription with the host INSIDE the encrypted channel; the host seals every alert
+ * itself (RFC 8291) and asks the relay only to deliver the ciphertext. `on:false` withdraws the subscription. The host answers with `pushack`.
+ */
+export const PushSub = z.object({
+  endpoint: z.string().min(12).max(1024).regex(/^https:\/\//),
+  p256dh: z.string().regex(/^[A-Za-z0-9_-]{80,100}$/),
+  auth: z.string().regex(/^[A-Za-z0-9_-]{20,30}$/),
+}).strict();
+export type PushSub = z.infer<typeof PushSub>;
+export const PushRegData = z.object({ on: z.boolean(), sub: PushSub.optional() }).strict().refine((d) => !d.on || !!d.sub, { message: 'a subscription is needed to turn alerts on' });
+export type PushRegData = z.infer<typeof PushRegData>;
+/** why alerts are or are not on for this device, as the host sees it */
+export const PushAckData = z.object({ on: z.boolean(), why: z.enum(['ok', 'off', 'host_off', 'rejected']).optional() }).strict();
+export type PushAckData = z.infer<typeof PushAckData>;
+
+/** the payload of an alert, sealed for the device's subscription. There is nothing else in it: the service worker shows fixed words. */
+export const AlertPayload = z.object({ v: z.literal(1), k: z.literal('waiting'), r: z.string().regex(/^[a-z0-9-]{4,40}$/).optional() }).strict();
+export type AlertPayload = z.infer<typeof AlertPayload>;
+
+/** the replace key of every state frame: the newest one wins at the relay */
+export const STATE_REPLACE_KEY = 's';
+
+export const HOST_KINDS = ['state', 'result', 'keyupdate', 'revoked', 'pushack'] as const;
+export const DEVICE_KINDS = ['action', 'sync', 'keyupdate', 'push'] as const;
 
 export const DEFAULT_PRESETS: readonly Preset[] = [
   { id: 'continue', label: 'Continue' },

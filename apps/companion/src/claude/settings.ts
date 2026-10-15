@@ -5,7 +5,8 @@
  */
 import { copyFileSync, existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
-import { homedir } from 'node:os';
+import { homedir, platform } from 'node:os';
+import { isVersionedPath } from './launcher.ts';
 
 export const MARKER = '--bw-companion';
 export const HOOK_EVENTS = ['SessionStart', 'UserPromptSubmit', 'PermissionRequest', 'Notification', 'Stop', 'PostToolUse', 'SessionEnd'] as const;
@@ -15,11 +16,21 @@ interface Hook { type: string; command?: string; timeout?: number; async?: boole
 interface Group { matcher?: string; hooks?: Hook[]; [k: string]: unknown }
 type Settings = { hooks?: Record<string, Group[]>; [k: string]: unknown };
 
-const q = (s: string): string => (/^[A-Za-z0-9_@%+=:,./-]+$/.test(s) ? s : `"${s.replace(/(["\\$`])/g, '\\$1')}"`);
+/**
+ * Quotes one word of a command line. POSIX: safe words stay bare, others go in double quotes with $ ` \ " escaped. Windows: backslashes become forward
+ * slashes (node and every shell Claude Code may use accept them, while a backslash inside double quotes means something different in Git Bash,
+ * PowerShell and cmd) and a word with a space goes in plain double quotes.
+ */
+export function quoteWord(s: string, win: boolean = platform() === 'win32'): string {
+  const safe = /^[A-Za-z0-9_@%+=:,./-]+$/;
+  if (win) { const f = s.replace(/\\/g, '/'); return safe.test(f) ? f : `"${f.replace(/"/g, '')}"`; }
+  return safe.test(s) ? s : `"${s.replace(/(["\\$`])/g, '\\$1')}"`;
+}
 
-/** the command line for one event: absolute node, absolute script, so it does not depend on PATH */
-export function hookCommand(event: string, o: { node: string; script: string }): string {
-  return `${q(o.node)} --disable-warning=ExperimentalWarning ${q(o.script)} hook ${event} ${MARKER}`;
+/** the command line for one event: absolute node and the stable launcher (see launcher.ts), so it depends neither on PATH nor on the companion's version */
+export function hookCommand(event: string, o: { node: string; script: string; win?: boolean }): string {
+  const w = o.win ?? platform() === 'win32';
+  return `${quoteWord(o.node, w)} --disable-warning=ExperimentalWarning ${quoteWord(o.script, w)} hook ${event} ${MARKER}`;
 }
 
 export function settingsPath(scope: 'user' | 'project' | 'local', cwd: string, env: Record<string, string | undefined> = process.env): string {
@@ -61,6 +72,13 @@ export function withoutHooks(cur: Settings): Settings {
     if (groups.length) out.hooks[ev] = groups; else delete out.hooks[ev];
   }
   if (Object.keys(out.hooks).length === 0) delete out.hooks;
+  return out;
+}
+
+/** our hook commands that name a per-version path (`.../versions/0.1.1/companion.mjs`): they stop working when the companion updates; `install-hooks` rewrites them */
+export function versionedHooks(cur: Settings): string[] {
+  const out: string[] = [];
+  for (const gs of Object.values(cur.hooks ?? {})) for (const g of gs) for (const h of g.hooks ?? []) if (isOurs(h) && isVersionedPath(h.command ?? '')) out.push(h.command!);
   return out;
 }
 

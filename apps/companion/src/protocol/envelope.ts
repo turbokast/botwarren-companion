@@ -26,7 +26,12 @@ export const MAX_INNER_BYTES = 8192 - 2;
 export const CLOCK_SKEW_MS = 120_000;
 export const BUCKETS = [256, 512, 1024, 2048, 4096, 8192] as const;
 
-export interface Header { v: 1; f: string; t: string; n: number; ts: number; x: number; ep: number; m: string }
+/**
+ * `r` is the optional REPLACE KEY: an opaque, sender-chosen label (1 to 16 characters). The relay may drop an older queued frame of the same
+ * sender and recipient that carries the same key, so a device that was away gets the newest state instead of a pile of old ones. It is part
+ * of the signed header (the relay cannot add, change or strip it unnoticed) and it says nothing about the content.
+ */
+export interface Header { v: 1; f: string; t: string; n: number; ts: number; x: number; ep: number; m: string; r?: string }
 export interface Frame { t: 'msg'; h: string; c: string; s: string }
 export interface PeerKey { id: string; kemPub: Bytes; epoch: number }
 
@@ -60,10 +65,15 @@ export interface SealInput {
   ttlMs: number;
   kind: string;
   data: unknown;
+  /** replace key (see Header.r): a newer frame with the same key supersedes an older one still queued at the relay */
+  replace?: string;
 }
 
+export const REPLACE_KEY = /^[A-Za-z0-9_-]{1,16}$/;
+
 export async function sealMessage(i: SealInput): Promise<Frame> {
-  const header: Header = { v: 1, f: i.from.id, t: i.to.id, n: i.seq, ts: i.now, x: i.now + i.ttlMs, ep: i.to.epoch, m: b64u(randomBytes(12)) };
+  const header: Header = { v: 1, f: i.from.id, t: i.to.id, n: i.seq, ts: i.now, x: i.now + i.ttlMs, ep: i.to.epoch, m: b64u(randomBytes(12)), ...(i.replace ? { r: i.replace } : {}) };
+  if (header.r !== undefined && !REPLACE_KEY.test(header.r)) throw new Error('bad replace key');
   const hBytes = utf8(JSON.stringify(header));
   const inner = utf8(JSON.stringify({ k: i.kind, f: i.from.id, t: i.to.id, d: i.data }));
   const sealed = await sealBase(i.to.kemPub, HPKE_INFO, hBytes, pad(inner));
@@ -83,6 +93,7 @@ export function peekHeader(frame: unknown): { header: Header; hBytes: Bytes; c: 
     if (h.v !== 1 || !ID.test(h.f) || !ID.test(h.t)) return null;
     if (!Number.isSafeInteger(h.n) || h.n < 0 || !Number.isSafeInteger(h.ts) || !Number.isSafeInteger(h.x) || !Number.isSafeInteger(h.ep) || h.ep < 0) return null;
     if (typeof h.m !== 'string' || !/^[A-Za-z0-9_-]{16}$/.test(h.m)) return null;
+    if (h.r !== undefined && (typeof h.r !== 'string' || !REPLACE_KEY.test(h.r))) return null;
     return { header: h, hBytes, c: unb64u(f.c), sig: unb64u(f.s) };
   } catch { return null; }
 }

@@ -231,8 +231,9 @@ describe('CLI process behaviour', () => {
     const { run: runCommand } = await import('../src/commands.ts');
     const home = join(tmp(), 'h');
     const server = await generateIdentity(true);
-    const saved = { env: process.env.BOTWARREN_COMPANION_HOME, tty: Object.getOwnPropertyDescriptor(process.stdin, 'isTTY') };
-    process.env.BOTWARREN_COMPANION_HOME = home;
+    // a service unit on the machine running the tests must not change what is printed: HOME and XDG point at an empty folder
+    const saved = { env: process.env.BOTWARREN_COMPANION_HOME, home: process.env.HOME, xdg: process.env.XDG_CONFIG_HOME, tty: Object.getOwnPropertyDescriptor(process.stdin, 'isTTY') };
+    process.env.BOTWARREN_COMPANION_HOME = home; process.env.HOME = tmp(); process.env.XDG_CONFIG_HOME = join(process.env.HOME, 'xdg');
     Object.defineProperty(process.stdin, 'isTTY', { value: true, configurable: true });
     let printed = ''; const write = process.stdout.write.bind(process.stdout);
     process.stdout.write = ((s: string | Uint8Array) => { printed += String(s); return true; }) as typeof process.stdout.write;
@@ -243,19 +244,21 @@ describe('CLI process behaviour', () => {
       // a ticket for another computer is refused, a good one is saved (no daemon is running, so it says how to start one)
       const other = await generateIdentity(true);
       const ask = (answer: string) => async (q: string) => { question = q; return answer; };
-      expect(await runCommand(['enroll'], { script: cli, node: process.execPath, ask: ask(await enrolmentFor(other.id, b64u(other.pub))) })).toBe(1);
+      expect(await runCommand(['enroll'], { script: cli, node: process.execPath, tty: true, ask: ask(await enrolmentFor(other.id, b64u(other.pub))) })).toBe(1);
       expect(new Store(home).enrollment()).toBeNull();
-      expect(await runCommand(['enroll'], { script: cli, node: process.execPath, ask: ask('  ' + await enrolmentFor(host.hostId, host.hostSig) + '  ') })).toBe(0);
+      expect(await runCommand(['enroll'], { script: cli, node: process.execPath, tty: true, ask: ask('  ' + await enrolmentFor(host.hostId, host.hostSig) + '  ') })).toBe(0);
       expect(question).toContain('Paste the enrolment');
       expect(printed).toContain(host.hostSig); // the public key the account page asks for
       expect(printed).toContain('https://botwarren.com/account');
       expect(printed).toContain('botwarren-companion daemon');
       expect(new Store(home).enrollment()?.relayUrl).toBe('wss://relay.botwarren.com');
       // garbage pasted is refused without saving
-      expect(await runCommand(['enroll'], { script: cli, node: process.execPath, ask: ask('not json') })).toBe(1);
+      expect(await runCommand(['enroll'], { script: cli, node: process.execPath, tty: true, ask: ask('not json') })).toBe(1);
     } finally {
       process.stdout.write = write;
       if (saved.env === undefined) delete process.env.BOTWARREN_COMPANION_HOME; else process.env.BOTWARREN_COMPANION_HOME = saved.env;
+      if (saved.home === undefined) delete process.env.HOME; else process.env.HOME = saved.home;
+      if (saved.xdg === undefined) delete process.env.XDG_CONFIG_HOME; else process.env.XDG_CONFIG_HOME = saved.xdg;
       if (saved.tty) Object.defineProperty(process.stdin, 'isTTY', saved.tty); else delete (process.stdin as { isTTY?: boolean }).isTTY;
     }
   });

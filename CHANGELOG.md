@@ -6,6 +6,36 @@ A release is only built from a dated entry in this file: the release workflow ta
 
 ## [Unreleased]
 
+## [0.1.2] - 2026-10-15
+
+Fixes the problems found by the first real-world test (a phone that got no alert, a relay queue that overflowed, a command that could not reach a daemon that was running, Claude Code settings that broke on update, a prompt that silently did nothing without a terminal) and adds phone alerts.
+
+### Added
+
+- **Phone alerts: "An agent is waiting for you".** Optional, off until the person turns **Alerts** on in the phone page (gear icon; a one-time offer on the home screen). The phone page registers its own Web Push subscription and gives it to the computer inside the end-to-end encrypted channel (new message kinds `push` and `pushack`); when a request starts waiting, the computer seals one alert for that phone's keys (RFC 8291) and asks the relay only to deliver the ciphertext (a new relay `push` message, at most 600 bytes, real browser push services only, rate limited). The alert says nothing but those words: no tool, command, project or session text; the relay, the push service and Botwarren's website cannot read it, and the website is not in the path. Tapping it opens the page on that request (`#/r/<id>`), or says truthfully that it was already answered. One alert per waiting episode with a 15 second settle time, coalesced, at most one a minute and 12 an hour, quiet after an answer, held back by pause and by quiet hours (`botwarren-companion alerts quiet 22:00-07:00`); `botwarren-companion alerts` shows and sets the computer-side switches. On iPhone and iPad the page explains that alerts need the Home Screen. The relay needs its own VAPID key pair (`RELAY_VAPID_PUBLIC_KEY`, `RELAY_VAPID_PRIVATE_KEY`); without it alerts are not offered. Design, the rejected alternative (reusing the website's push) and what each party can see: [docs/ALERTS.md](docs/ALERTS.md).
+- **One service worker (`sw.js`)**, only for alerts: handlers for `push` and `notificationclick` and none for network requests; its SHA-256 is listed in the signed client manifest and the page refuses to register a copy that differs.
+- **A replace key in the signed message header** (`r`, optional, opaque): the relay keeps only the newest queued frame per sender and key. The computer marks every `state` frame, so a phone that was away finds one queued state (the latest of every session, with the request that is pending now) instead of a pile; when a queue is full the oldest frame without a key goes first. Counters `queue_replaced`, `push_*`; `POST /admin/push` switches alerts off at once.
+- `botwarren-companion claude register-channel [--yes]` now registers the channel (`claude mcp add`), and replaces a registration made by 0.1.1.
+- Windows, macOS and Linux: command lines written into Claude Code's settings use forward slashes on Windows and quote spaces (macOS "Application Support").
+
+### Fixed
+
+- **The computer sent a frame for every hook event.** Every `PostToolUse` of every session produced a state message, which overflowed the relay's queue while the phone was away (46 queued and 51 dropped in the first test). A state that is unchanged since the device last got one is not sent again, non-urgent changes are sent at most every 2 seconds (a request appearing or going is still immediate), and a device that asks to sync always gets the state.
+- **"Connection refused" on the daemon socket after `enroll`.** When a service restarted the daemon, the stopping daemon deleted the new daemon's socket (the runtime removes the path a server was bound to when it closes). Now the stopping daemon leaves a replacement alone, a daemon checks every 5 seconds (and on SIGHUP) that its socket file is still the one it created and binds again if it was removed or replaced by a dead file, and a daemon refuses to start on a socket another live daemon answers on. `enroll` at a terminal waits until the service has started the daemon again and says so; when a command cannot reach the daemon it says whether the socket is stale or the daemon is not running, and names the service's restart command (`systemctl --user restart botwarren-companion`, `launchctl kickstart -k ...`) when a service unit exists.
+- **Claude Code settings broke on every update.** `claude install-hooks` and the channel registration wrote `.../versions/0.1.1/companion.mjs`. They now name a stable launcher (`launch.mjs`) in the companion's own folder, which runs whatever version the daemon last started as (`entry.json`, rewritten at every daemon start). `install-hooks` finds hooks with a per-version path, says so, rewrites them (with a backup, keeping the user's own hooks), and `claude doctor` flags them. An installer update moves a background service from an earlier install to the new version and restarts it.
+- **`install-hooks` without a terminal silently did nothing.** Commands that ask a question (`install-hooks`, `register-channel`, `uninstall --purge`) print "Re-run with --yes to apply it" when no terminal is attached, instead of waiting for an answer that cannot come; input on a pipe is never taken as consent.
+
+### Changed
+
+- `botwarren-companion status` shows the alert setting; `claude doctor` checks the launcher, hooks and channel registration.
+- Docs: [ALERTS.md](docs/ALERTS.md) (new), PROTOCOL (replace key, `push`/`pushack`, relay push, threat rows T10 and T11), RELAY (VAPID configuration), CLIENT_SECURITY (the worker).
+
+### Known limits
+
+- Alerts need a relay with VAPID keys and a browser with Web Push; on iPhone only from the Home Screen (the Home Screen app is a separate pairing). The relay and the push service can see *when* an agent started waiting.
+- The text of what a worker shows when no page is visible is tested against the real file with a stand-in scope; headless Chrome has no notification centre to read back.
+- The Windows and macOS paths (`.cmd`, launchd, the Startup folder) have unit tests and CI but little manual testing.
+
 ## [0.1.1] - 2026-10-15
 
 Makes the first release usable: how to get the command, an install for computers without a ship agent, renewal of the signed manifest, and a relay image fix.

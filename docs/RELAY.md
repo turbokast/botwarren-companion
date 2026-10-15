@@ -31,6 +31,8 @@ docker build -f ctx/Dockerfile.relay -t botwarren-relay:X.Y.Z ctx
 | `RELAY_GLOBAL_KILL` | no | `1` starts with the global kill switch on |
 | `RELAY_TRUST_FLY_PROXY` | no | `1` reads the client address from the `Fly-Client-IP` header (only behind that proxy; leave it off otherwise, or anyone could spoof their address) |
 | `RELAY_CLIENT_DIR` | no | Directory of the signed client, default `/srv/client` in the image |
+| `RELAY_VAPID_PUBLIC_KEY`, `RELAY_VAPID_PRIVATE_KEY` | no | Phone alerts: the relay's own Web Push application server key pair (P-256, base64url; RFC 8292). Both must be set and form a pair, or alerts stay off (the relay says so at start and the page does not offer them). **Generate once and keep**: a different key invalidates every phone's alert subscription. The private key is a secret |
+| `RELAY_VAPID_SUBJECT` | no | The RFC 8292 contact for the push services, a `mailto:` or `https:` URI; default `mailto:support@turbokast.com`. Set your own when you run your own relay |
 
 Secrets (`RELAY_TICKET_KEYS` is public key material, `RELAY_ADMIN_TOKEN` is a secret) are passed as environment variables by the platform's secret store, never baked into the image. Put the relay behind TLS (the clients connect with `wss://`) and give it no volume.
 
@@ -40,6 +42,16 @@ Secrets (`RELAY_TICKET_KEYS` is public key material, `RELAY_ADMIN_TOKEN` is a se
 * `GET /manifest.json` and `GET /manifest.json.sig` are byte-identical to the release's `client-manifest.json` and `client-manifest.json.sig` (the release workflow's `relay-image` job checks this for the image; check it again against the live origin).
 * The response headers of `/` carry the strict content security policy (`default-src 'none'; script-src 'self' blob:; ...`), and no cookie is ever set.
 * `GET /admin/stats` with the admin token shows counters only.
+* With alerts configured, `GET /v1/push/key` answers `{"key":"<the public key>"}` (and 404 without them); the key must equal `RELAY_VAPID_PUBLIC_KEY`.
+* `GET /sw.js` is the alert service worker, byte-identical to the one the signed client manifest lists; its `Content-Security-Policy` carries `worker-src 'self'`.
+
+## Phone alerts
+
+The relay is only a courier for alerts: the computer seals each one for the phone's own keys and the relay POSTs the ciphertext to the phone's push service, signing the request with the VAPID key. It cannot read or write an alert, keeps nothing, and logs nothing about one (counters: `push_sent`, `push_gone`, `push_rate_limited`, `push_bad_endpoint`, `push_malformed`, `push_off`, `push_failed_*`). Only real browser push services are ever called. The design and what each party can see: [ALERTS.md](ALERTS.md). `POST /admin/push` with the admin token and `{"on":false}` switches alerts off at once; `{"on":true}` back on.
+
+## Queue
+
+A host's `state` frames carry a replace key, so a phone that is away leaves one queued state, the newest, instead of up to 100: the counters `queue_replaced` (a frame was superseded) and `queue_overflow` (a frame was dropped for lack of room) show it. When the queue is full the oldest frame without a replace key goes first.
 
 ## Kill switches
 

@@ -76,14 +76,19 @@ botwarren-companion daemon      # leave it running (or install with --service so
 
 ```
 botwarren-companion pair                      # a code and QR appear HERE; open the page, type the code, compare the six digits, answer y
-botwarren-companion claude register-channel   # prints how to register the Claude Code channel (research preview) and the launch flag
-botwarren-companion claude install-hooks      # shows a diff, asks, backs up, adds fail-open hooks
+botwarren-companion claude register-channel   # registers the Claude Code channel (research preview) with `claude mcp add`; --yes to run it without asking
+botwarren-companion claude install-hooks      # shows a diff, asks (or needs --yes without a terminal), backs up, adds fail-open hooks; also rewrites old per-version paths
+botwarren-companion alerts [on|off]           # phone alerts: status and switches (idle turns, quiet hours); each phone also has its own switch
 botwarren-companion status | devices | pause | resume | log
 botwarren-companion devices revoke <name>
 botwarren-companion uninstall --purge         # revokes devices, stops the daemon, removes hooks, deletes keys
 ```
 
 `botwarren-companion` is the command the installer (or the ship agent) puts next to your other commands; it stands for `node companion.mjs` from the installed bundle (the same file the zip contains), or `pnpm --filter @botwarren/companion cli` in a checkout. With the ship agent, `botwarren companion pair` (and `devices`, `status`, `pause`, `resume`, `confirm`, `log`, `claude ...`) is the same thing; remove an agent-installed companion with `botwarren companion remove`, not `uninstall`.
+
+### Alerts on your phone
+
+Turn **Alerts** on in the phone page (gear icon). When an agent starts waiting for you, the phone shows **"An agent is waiting for you"** and nothing else (no tool, command, project or session text); tapping it opens the request. The computer seals each alert for your phone's own keys, so the relay and the push service cannot read it, and Botwarren's website is not involved. On iPhone and iPad alerts need the page on the Home Screen (pair again from there). Design, controls and what each party can see: [docs/ALERTS.md](docs/ALERTS.md).
 
 ### Claude Code requirements
 
@@ -105,7 +110,7 @@ Defaults: `deny` always works remotely; `approve` and preset replies work remote
 | `apps/companion/vendor/agent/` | verbatim copies of the few ship agent files the release tooling shares (the pinned public keys, manifest schema and verifier, archive writer, KMS client, component signer) |
 | `apps/relay/` | the relay: WebSocket frame forwarding, pairing rendezvous, rate limits, kill switches, static hosting of the signed client |
 | `deploy/Dockerfile.relay` | the relay image, built from a release's relay image inputs ([docs/RELAY.md](docs/RELAY.md)) |
-| `docs/` | [PROTOCOL.md](docs/PROTOCOL.md), [CLIENT_SECURITY.md](docs/CLIENT_SECURITY.md), [RELAY.md](docs/RELAY.md), [RELEASING.md](docs/RELEASING.md), [REPO_SETTINGS.md](docs/REPO_SETTINGS.md) |
+| `docs/` | [PROTOCOL.md](docs/PROTOCOL.md), [ALERTS.md](docs/ALERTS.md), [CLIENT_SECURITY.md](docs/CLIENT_SECURITY.md), [RELAY.md](docs/RELAY.md), [RELEASING.md](docs/RELEASING.md), [REPO_SETTINGS.md](docs/REPO_SETTINGS.md) |
 
 ## Develop
 

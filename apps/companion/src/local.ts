@@ -3,8 +3,8 @@
  * home directory (a named pipe on Windows), never a network port. Every request carries the per-install secret from hook.secret.
  * Newline-delimited JSON. Licence: Apache-2.0.
  */
-import { createServer, type Server, type Socket } from 'node:net';
-import { chmodSync, existsSync, unlinkSync } from 'node:fs';
+import { createConnection, createServer, type Server, type Socket } from 'node:net';
+import { chmodSync, existsSync, renameSync, statSync, unlinkSync } from 'node:fs';
 import { timingSafeEqual, randomBytes } from 'node:crypto';
 import { ClaudeBridge } from './claude/bridge.ts';
 import { CompanionHost, type LocalConfirmRequest } from './host.ts';
@@ -42,22 +42,95 @@ export class LocalServer {
   private readonly path: string;
   private readonly shutdown: () => void;
   private readonly sockets = new Set<Socket>();
+  private readonly watchMs: number;
+  /** the inode of the socket file this server created (Unix): if the file at the path is ever another one, this server is no longer the one clients reach */
+  private ino: number | null = null;
+  private watch: ReturnType<typeof setInterval> | null = null;
+  private verifying = false;
+  /** told when the socket was taken back or found to belong to someone else (the daemon audits it) */
+  onSocketEvent: (e: 'rebound' | 'taken') => void = () => undefined;
 
-  constructor(o: { host: CompanionHost; bridge: ClaudeBridge; hub: ConfirmHub; secret: string; path: string; shutdown: () => void }) {
+  constructor(o: { host: CompanionHost; bridge: ClaudeBridge; hub: ConfirmHub; secret: string; path: string; shutdown: () => void; watchMs?: number }) {
     this.host = o.host; this.bridge = o.bridge; this.hub = o.hub; this.secret = Buffer.from(o.secret); this.path = o.path; this.shutdown = o.shutdown;
+    this.watchMs = o.watchMs ?? 5000;
+  }
+
+  private get unix(): boolean { return process.platform !== 'win32'; }
+  private inoOfPath(): number | null { try { return statSync(this.path).ino; } catch { return null; } }
+
+  /** true if something accepts connections on the path right now (a live daemon, as opposed to a stale file) */
+  private answers(): Promise<boolean> {
+    return new Promise<boolean>((ok) => {
+      const c = createConnection(this.path);
+      const done = (v: boolean): void => { clearTimeout(t); c.destroy(); ok(v); };
+      const t = setTimeout(() => done(false), 800);
+      c.once('connect', () => done(true));
+      c.once('error', () => done(false));
+    });
   }
 
   async listen(): Promise<void> {
-    if (process.platform !== 'win32' && existsSync(this.path)) unlinkSync(this.path); // a stale socket from a crashed run
-    this.server = createServer((sock) => this.onSocket(sock));
-    await new Promise<void>((ok, bad) => { this.server!.once('error', bad); this.server!.listen(this.path, ok); });
-    if (process.platform !== 'win32') chmodSync(this.path, 0o600);
+    if (this.unix && existsSync(this.path)) {
+      // a file from a crashed run is removed; one that something still answers on is another running daemon, which must not be knocked off its socket
+      if (await this.answers()) throw new Error('another companion daemon is already running on this socket');
+      unlinkSync(this.path);
+    }
+    await this.bind();
+    if (this.unix && this.watchMs > 0 && !this.watch) { this.watch = setInterval(() => { void this.verify(); }, this.watchMs); this.watch.unref(); }
+  }
+
+  private async bind(): Promise<void> {
+    const server = createServer((sock) => this.onSocket(sock));
+    await new Promise<void>((ok, bad) => { server.once('error', bad); server.listen(this.path, ok); });
+    this.server = server;
+    if (this.unix) { chmodSync(this.path, 0o600); this.ino = this.inoOfPath(); }
+  }
+
+  /**
+   * Closes a listening server WITHOUT deleting somebody else's socket. libuv unlinks the path a server was bound to when it closes, whatever file is
+   * there by then; if a restarted daemon has bound the same path meanwhile, that would delete the new daemon's socket and leave it listening on a file
+   * nobody can reach (clients get "connection refused"). So a file that is not ours is moved aside for the moment of the close and put back.
+   */
+  private async closeServer(server: Server | null, wait = true): Promise<void> {
+    if (!server) return;
+    let aside: string | null = null;
+    if (this.unix) {
+      const cur = this.inoOfPath();
+      if (cur !== null && cur !== this.ino) { aside = `${this.path}.keep-${process.pid}`; try { renameSync(this.path, aside); } catch { aside = null; } }
+    }
+    // the listening handle (and its file) is released at once; the callback only fires when every open connection has ended, which a long-lived channel never does
+    const closed = new Promise<void>((ok) => { server.close(() => ok()); });
+    if (wait) await closed;
+    if (aside) { try { renameSync(aside, this.path); } catch { /* the other daemon is gone too */ } }
+  }
+
+  /**
+   * Checks that the socket file at the path is still the one this server created (Unix). If it was deleted or replaced by a dead file (an update, a
+   * cleanup, an old daemon exiting) the server is bound again at once, so the CLI and the hooks can reach this daemon. If another daemon is live on
+   * the path, nothing is touched. Runs every few seconds and on SIGHUP.
+   */
+  async verify(): Promise<'ok' | 'rebound' | 'taken'> {
+    if (!this.unix || !this.server || this.verifying) return 'ok';
+    const cur = this.inoOfPath();
+    if (cur !== null && cur === this.ino) return 'ok';
+    this.verifying = true;
+    try {
+      if (cur !== null && (await this.answers())) { this.onSocketEvent('taken'); return 'taken'; }
+      if (cur !== null) { try { unlinkSync(this.path); } catch { /* gone already */ } }
+      const old = this.server;
+      this.server = null;
+      await this.closeServer(old, false); // existing connections (an attached channel) stay up
+      await this.bind();
+      this.onSocketEvent('rebound');
+      return 'rebound';
+    } finally { this.verifying = false; }
   }
 
   async close(): Promise<void> {
+    if (this.watch) { clearInterval(this.watch); this.watch = null; }
     for (const s of this.sockets) s.destroy();
-    await new Promise<void>((ok) => { if (!this.server) return ok(); this.server.close(() => ok()); });
-    if (process.platform !== 'win32' && existsSync(this.path)) try { unlinkSync(this.path); } catch { /* ignore */ }
+    const server = this.server; this.server = null;
+    await this.closeServer(server); // removes our own socket file (libuv), and leaves a replacement alone
   }
 
   private authed(m: Msg): boolean {
@@ -128,6 +201,7 @@ export class LocalServer {
             relay: this.host.relayState, enrolled: this.host.store.enrollment() !== null, paused: cfg.paused, hostId: this.host.hostId,
             devices: this.host.listDevices().map((d) => ({ id: d.id.slice(0, 8), name: d.name, lastSeen: d.lastSeen, pairedAt: d.pairedAt })),
             sessions: [...this.host.sessions.sessions.values()].map((s) => ({ label: s.label, status: s.status, waiting: !!s.pending, channel: !!s.channel, masked: s.masked })),
+            alerts: { enabled: cfg.alerts.enabled, phones: this.host.listDevices().filter((d) => d.push).length },
             pendingConfirmations: this.hub.pending,
           },
         });

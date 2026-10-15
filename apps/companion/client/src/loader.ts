@@ -18,7 +18,7 @@ const DOMAIN = 'botwarren-client-v1\0';
 const enc = new TextEncoder();
 
 interface Entry { path: string; sha256: string; size: number; type: string }
-interface Manifest { schema: 1; kind: 'botwarren-companion-client'; version: string; build: string; issued: string; expires: string; entry: { js: Entry; css: Entry } }
+interface Manifest { schema: 1; kind: 'botwarren-companion-client'; version: string; build: string; issued: string; expires: string; entry: { js: Entry; css: Entry }; sw?: Entry }
 
 const b64 = (s: string): Uint8Array<ArrayBuffer> => {
   const bin = atob(s.replace(/-/g, '+').replace(/_/g, '/'));
@@ -76,8 +76,10 @@ async function boot(): Promise<void> {
     const cssUrl = URL.createObjectURL(new Blob([css as BlobPart], { type: 'text/css' }));
     const link = document.createElement('link'); link.rel = 'stylesheet'; link.href = cssUrl; document.head.appendChild(link);
     const jsUrl = URL.createObjectURL(new Blob([js as BlobPart], { type: 'text/javascript' }));
-    const mod = (await import(/* @vite-ignore */ jsUrl)) as { start: (info: { build: string; version: string; keyId: string; expires: string }) => void };
-    mod.start({ build: m.build, version: m.version, keyId, expires: m.expires });
+    const mod = (await import(/* @vite-ignore */ jsUrl)) as { start: (info: { build: string; version: string; keyId: string; expires: string; sw?: { path: string; sha256: string; size: number } }) => void };
+    // the alert service worker is not run by the loader; its signed hash is handed to the app, which registers it only if the served bytes match
+    const sw = m.sw && /^[A-Za-z0-9._-]+$/.test(m.sw.path) ? { path: m.sw.path, sha256: m.sw.sha256, size: m.sw.size } : undefined;
+    mod.start({ build: m.build, version: m.version, keyId, expires: m.expires, ...(sw ? { sw } : {}) });
   } catch (e) { fail((e as Error).message); }
 }
 
