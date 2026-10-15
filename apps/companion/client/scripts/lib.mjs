@@ -5,7 +5,7 @@
 import { createHash, createPrivateKey, createPublicKey, sign as edSign, verify as edVerify } from 'node:crypto';
 import { cpSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const here = dirname(fileURLToPath(import.meta.url));
 export const clientRoot = resolve(here, '..');
@@ -18,14 +18,14 @@ const sha = (b) => createHash('sha256').update(b).digest('hex');
  * Dev keys only when asked.
  */
 export async function releaseKeys({ allowDev = false, extra = [], keysModule = resolve(here, '../../vendor/agent/src/update/keys.ts') } = {}) {
-  const { COMPONENT_PUBLIC_KEYS, roleOf } = await import(keysModule);
+  const { COMPONENT_PUBLIC_KEYS, roleOf } = await import(pathToFileURL(keysModule).href);
   const keys = COMPONENT_PUBLIC_KEYS.filter((k) => roleOf(k) === 'component' && (allowDev || !k.dev)).map((k) => ({ id: k.id, spki: k.spki }));
   return [...keys, ...extra];
 }
 
 /** ids of pinned component keys whose public key is still the PLACEHOLDER (nothing may be signed with them) */
 export async function placeholderKeyIds({ keysModule = resolve(here, '../../vendor/agent/src/update/keys.ts') } = {}) {
-  const { COMPONENT_PUBLIC_KEYS } = await import(keysModule);
+  const { COMPONENT_PUBLIC_KEYS } = await import(pathToFileURL(keysModule).href);
   return COMPONENT_PUBLIC_KEYS.filter((k) => k.placeholder === true).map((k) => k.id);
 }
 

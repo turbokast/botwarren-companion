@@ -132,7 +132,8 @@ describe('transcript reading is confined', () => {
 });
 
 describe('files at rest', () => {
-  it('everything in the home directory is mode 0600 and the directory 0700', async () => {
+  // POSIX modes only: Windows has no mode bits (the directory is in the user's profile, protected by its ACL)
+  it.skipIf(process.platform === 'win32')('everything in the home directory is mode 0600 and the directory 0700', async () => {
     const dir = join(tmp(), 'home');
     const store = new Store(dir);
     const host = new CompanionHost({ store, confirmer: async () => false });
