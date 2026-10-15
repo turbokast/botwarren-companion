@@ -16,10 +16,11 @@ import { Ticket, unb64u } from './protocol/index.ts';
 import { HOOK_EVENTS, hasOurHooks, quoteWord, readSettings, settingsPath, simpleDiff, versionedHooks, withHooks, withoutHooks, writeSettings } from './claude/settings.ts';
 import { installLauncher, isVersionedPath, launcherHealth, launcherPath } from './claude/launcher.ts';
 import { CHANNEL_NAME } from './claude/channel.ts';
-import { noDaemonMessage, serviceUnit } from './service.ts';
+import { noDaemonMessage, serviceUnit, versionMismatchMessage } from './service.ts';
 import { parseClock } from './alerts.ts';
 
-export const VERSION = '0.1.2';
+import { VERSION } from './version.ts';
+export { VERSION };
 
 /** `tty`: a person is at the other end of stdin and can answer a question; false when a script, a pipe or another program runs the command */
 export interface Ctx { script: string; node: string; ask: (q: string) => Promise<string>; tty: boolean }
@@ -195,8 +196,11 @@ async function status(dir: string): Promise<number> {
   const l = await link(dir);
   if (!l) { out('daemon: not running'); out(noDaemonMessage({ socketFile: existsSync(socketPath(dir)), unit: serviceUnit() }).split('\n').slice(1).join('\n')); out(`enrolled: ${store.enrollment() ? 'yes' : 'no'}`); out(`devices: ${store.devices().length}`); out(`paused: ${store.config().paused}`); return 0; }
   const r = await l.request('status'); l.close();
-  const s = r.status as { relay: string; enrolled: boolean; paused: boolean; devices: { id: string; name: string; lastSeen: number | null }[]; sessions: { label: string; status: string; waiting: boolean; channel: boolean; masked: number }[]; alerts?: { enabled: boolean; phones: number }; pendingConfirmations: number };
-  out('daemon: running'); out(`relay: ${s.relay}   enrolled: ${s.enrolled}   paused: ${s.paused}`);
+  const s = r.status as { version?: string; relay: string; enrolled: boolean; paused: boolean; devices: { id: string; name: string; lastSeen: number | null }[]; sessions: { label: string; status: string; waiting: boolean; channel: boolean; masked: number }[]; alerts?: { enabled: boolean; phones: number }; pendingConfirmations: number };
+  out(`daemon: running${s.version ? ` (version ${s.version})` : ''}`);
+  const mm = versionMismatchMessage({ running: s.version, installed: VERSION, unit: serviceUnit() });
+  if (mm) out(mm);
+  out(`relay: ${s.relay}   enrolled: ${s.enrolled}   paused: ${s.paused}`);
   out(`devices (${s.devices.length}): ${s.devices.map((d) => d.name).join(', ') || 'none'}`);
   if (s.alerts) out(`phone alerts: ${s.alerts.enabled ? 'on' : 'OFF'}, ${s.alerts.phones} phone(s) subscribed`);
   for (const x of s.sessions) out(`  ${x.label}  ${x.status}${x.waiting ? '  WAITING' : ''}${x.channel ? '  channel' : ''}${x.masked ? `  ${x.masked} masked` : ''}`);
@@ -370,6 +374,8 @@ async function alerts(dir: string, a: string[]): Promise<number> {
   }
   if (sub !== undefined) { process.stderr.write('usage: alerts [on|off] | alerts idle on|off | alerts quiet HH:MM-HH:MM|off\n'); return 2; }
   const phones = store.devices().filter((d) => d.push);
+  const dl = await link(dir);
+  if (dl) { const st = (await dl.request('status')).status as { version?: string } | undefined; dl.close(); const mm = versionMismatchMessage({ running: st?.version, installed: VERSION, unit: serviceUnit() }); if (mm) out(mm); }
   out(`phone alerts from this computer: ${al.enabled ? 'on' : 'OFF'}${c.paused ? '   (paused: nothing is sent while remote answers are paused)' : ''}`);
   out(`phones with alerts on: ${phones.length ? phones.map((d) => d.name).join(', ') : 'none (turn Alerts on in the phone page: gear icon)'}`);
   out(`an alert says only "An agent is waiting for you": no tool, command, project or session name.`);

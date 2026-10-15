@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
+  LEGACY_FRAME_BYTES, frameBytesFor, maxInnerFor,
   BUCKETS, KemKeyring, KEY_GRACE_MS, MAX_FRAME_BYTES, ReplayGuard, SendCounter, b64u, concat, fromUtf8, generateIdentity, openMessage, pad, peekHeader, sealBase, sealMessage, sign,
   unb64u, unpad, utf8, verifyFrameSignature, DOMAIN, HPKE_INFO, type Frame, type Identity,
 } from '../src/protocol/index.ts';
@@ -42,7 +43,9 @@ describe('envelope: round trip and the order of checks', () => {
     for (const s of sizes) expect(BUCKETS as readonly number[]).toContain(s);
     expect(pad(new Uint8Array(10)).length).toBe(256);
     expect(unpad(pad(utf8('hi')))).toEqual(utf8('hi'));
-    expect(() => pad(new Uint8Array(9000))).toThrow();
+    expect(pad(new Uint8Array(9000)).length).toBe(16_384); // 0.1.3: long messages use the larger buckets
+    expect(pad(new Uint8Array(40_000)).length).toBe(65_536);
+    expect(() => pad(new Uint8Array(65_535))).toThrow();
     const bad = pad(utf8('hi')); bad[100] = 1;
     expect(unpad(bad)).toBeNull();
   });
@@ -128,7 +131,11 @@ describe('envelope: round trip and the order of checks', () => {
   it('peekHeader rejects oversize and malformed frames', () => {
     expect(peekHeader({ t: 'msg', h: 'a'.repeat(700), c: 'x', s: 'y' })).toBeNull();
     expect(peekHeader(null)).toBeNull();
-    expect(MAX_FRAME_BYTES).toBe(16384);
+    expect(MAX_FRAME_BYTES).toBe(96 * 1024);
+    expect(LEGACY_FRAME_BYTES).toBe(16384); // a 0.1.2 relay
+    expect(maxInnerFor(LEGACY_FRAME_BYTES)).toBe(8190); // against such a relay a frame stays in the old 8 KB bucket
+    expect(maxInnerFor(MAX_FRAME_BYTES)).toBe(65_534);
+    expect(frameBytesFor(65_536)).toBeLessThanOrEqual(MAX_FRAME_BYTES);
   });
 
   it('SendCounter never reuses a number across a crash', () => {

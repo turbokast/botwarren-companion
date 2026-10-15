@@ -4,7 +4,7 @@
  */
 import {
   KemKeyring, ReplayGuard, SendCounter, b64u, derivePairKeys, generateIdentity, idOf, openMessage, openOffer, openResult, parseCode, sealMessage, sealRequest, shortAuthString,
-  unb64u, verifyDeviceCert, StateData, ResultData, PushAckData, type KemEntry, type Signed, type Identity, type ActionData, type Frame, peekHeader,
+  unb64u, verifyDeviceCert, StateData, ResultData, PushAckData, PushTestAck, CAP_LONG, DEVICE_REPLACE_KEYS, type KemEntry, type Signed, type Identity, type ActionData, type Frame, peekHeader,
 } from '../../src/protocol/index.ts';
 import { RelayConnection, type ConnState } from '../../src/link/connection.ts';
 import { idbDel, idbGet, idbPut } from './idb.ts';
@@ -38,7 +38,15 @@ export class Link {
   revoked = false;
   /** what the computer says about this phone's alerts (null until it has said): on, and why not if not */
   alerts: PushAckData | null = null;
+  /**
+   * What this connection has heard from the computer since it connected. A computer on 0.1.2 or later answers every `sync` with `pushack`; one that
+   * sends state but never a `pushack` is older than that (it cannot send alerts at all). Used to say so in plain words instead of waiting forever.
+   */
+  stateSeen = false;
+  ackSeen = false;
+  private syncSentAt = 0;
   private alertWaiters: ((a: PushAckData | null) => void)[] = [];
+  private testWaiters = new Map<string, (a: PushTestAck) => void>();
   readonly results = new Map<string, Outcome>();
   private connection: RelayConnection | null = null;
   private ident!: Identity;
@@ -136,11 +144,14 @@ export class Link {
       onState: (s, info) => {
         this.conn = s;
         if (info?.peerOnline !== undefined) this.hostOnline = info.peerOnline;
-        if (s === 'online') { void this.send('sync', {}); void this.maybeRotate(); void this.resendAlerts(); }
+        if (s === 'online') {
+          this.stateSeen = false; this.ackSeen = false; this.connectedAt = Date.now();
+          for (const ms of [6500, 8500]) setTimeout(() => this.emit(), ms); // the "no answer yet" verdicts below are time-based: draw again when they can change
+          void this.sendSync(); void this.maybeRotate(); void this.resendAlerts(); }
         if (s === 'killed') { this.revoked = true; }
         this.emit();
       },
-      onPresence: (h) => { this.hostOnline = h; this.emit(); },
+      onPresence: (h) => { this.hostOnline = h; if (h) { void this.sendSync(); void this.resendAlerts(); } this.emit(); }, // the computer (re)started: tell it again what this page can read
     });
     this.connection.start();
   }
@@ -154,10 +165,11 @@ export class Link {
     if (!r.ok) return;
     this.persistSoon();
     switch (r.msg.kind) {
-      case 'state': { const s = StateData.safeParse(r.msg.data); if (s.success) { this.state = s.data; this.emit(); } return; }
+      case 'state': { const s = StateData.safeParse(r.msg.data); if (s.success) { this.state = s.data; this.stateSeen = true; this.badState = false; this.emit(); } else { this.stateSeen = true; this.badState = true; this.emit(); } return; }
       case 'result': { const x = ResultData.safeParse(r.msg.data); if (x.success) { this.results.set(x.data.rid, x.data.outcome); if (['applied', 'denied', 'expired', 'stale', 'failed'].includes(x.data.outcome)) this.dropPending(x.data.rid); this.waiters.get(x.data.rid)?.(x.data.outcome); this.waiters.delete(x.data.rid); this.emit(); } return; }
       case 'keyupdate': { const d = r.msg.data as { ep?: number; kem?: string }; if (typeof d.ep === 'number' && typeof d.kem === 'string' && d.ep > this.saved.hostEp) { this.saved.hostEp = d.ep; this.saved.hostKem = d.kem; void this.persist(); } return; }
-      case 'pushack': { const a = PushAckData.safeParse(r.msg.data); if (a.success) { this.alerts = a.data; for (const w of this.alertWaiters.splice(0)) w(a.data); this.emit(); } return; }
+      case 'pushack': { const a = PushAckData.safeParse(r.msg.data); if (a.success) { this.ackSeen = true; this.alerts = a.data; for (const w of this.alertWaiters.splice(0)) w(a.data); this.emit(); } return; }
+      case 'pushtestack': { const a = PushTestAck.safeParse(r.msg.data); if (a.success) this.testWaiters.get(a.data.n)?.(a.data); return; }
       case 'revoked': { this.revoked = true; await this.forgetLocal(); this.emit(); return; }
       default: return;
     }
@@ -169,20 +181,47 @@ export class Link {
     this.state = { ...this.state, sessions: this.state.sessions.map((s) => (s.pending?.rid === rid ? (({ pending: _p, ...rest }) => rest)(s) : s)) };
   }
 
+  /** a state the page could not read (a computer newer than this page, or a damaged one); shown as a plain notice */
+  badState = false;
+  /** when this connection became ready (ms since 1970) */
+  connectedAt = 0;
+
   private async send(kind: string, data: unknown): Promise<boolean> {
     if (!this.connection) return false;
-    const frame = await sealMessage({ from: this.ident, to: { id: this.hostId, kemPub: unb64u(this.saved.hostKem), epoch: this.saved.hostEp }, seq: this.counter.next() + 1, now: Date.now(), ttlMs: 120_000, kind, data });
+    const replace = (DEVICE_REPLACE_KEYS as Record<string, string>)[kind];
+    const frame = await sealMessage({ from: this.ident, to: { id: this.hostId, kemPub: unb64u(this.saved.hostKem), epoch: this.saved.hostEp }, seq: this.counter.next() + 1, now: Date.now(), ttlMs: 120_000, kind, data, ...(replace ? { replace } : {}) });
     return this.connection.sendFrame(frame);
   }
+
+  /** asks for the state and says what this page can read (long messages); a computer from before 0.1.3 ignores the extra field */
+  private async sendSync(): Promise<void> { this.syncSentAt = Date.now(); await this.send('sync', { caps: [CAP_LONG] }); }
+
+  /** true when the computer sent its state but has not answered the alerts question since this connection began: it is older than 0.1.2 */
+  hostLacksAlerts(graceMs = 6000): boolean { return this.conn === 'online' && this.hostOnline !== false && this.stateSeen && !this.ackSeen && Date.now() - this.syncSentAt > graceMs; }
 
   /**
    * Gives the computer this phone's Web Push subscription (or withdraws it), inside the encrypted channel, and waits for its answer. Resolves null if
    * the computer is not reachable: the page sends the subscription again whenever it connects, as long as the person has alerts on.
    */
-  async setAlerts(sub: { endpoint: string; p256dh: string; auth: string } | null): Promise<PushAckData | null> {
-    const answer = new Promise<PushAckData | null>((ok) => { const t = setTimeout(() => ok(null), 15_000); this.alertWaiters.push((a) => { clearTimeout(t); ok(a); }); });
-    if (!(await this.send('push', sub ? { on: true, sub } : { on: false }))) { this.alertWaiters.pop(); return null; }
-    return answer;
+  async setAlerts(sub: { endpoint: string; p256dh: string; auth: string } | null, waitMs = 12_000): Promise<{ sent: boolean; ack: PushAckData | null }> {
+    let waiter!: (a: PushAckData | null) => void;
+    const answer = new Promise<PushAckData | null>((ok) => { const t = setTimeout(() => { this.alertWaiters = this.alertWaiters.filter((w) => w !== waiter); ok(null); }, waitMs); waiter = (a) => { clearTimeout(t); ok(a); }; this.alertWaiters.push(waiter); });
+    if (!(await this.send('push', sub ? { on: true, sub } : { on: false }))) { this.alertWaiters = this.alertWaiters.filter((w) => w !== waiter); return { sent: false, ack: null }; }
+    return { sent: true, ack: await answer };
+  }
+
+  /**
+   * "Send a test alert": asks the computer to push a test alert to this phone through the same path real alerts take. `onStage` hears each step the
+   * computer reports (received, pushed, or failed and where). Resolves with the last thing heard, or null when the computer said nothing at all.
+   */
+  async sendTestAlert(n: string, onStage: (a: PushTestAck) => void, waitMs = 10_000): Promise<PushTestAck | null> {
+    let last: PushTestAck | null = null;
+    return new Promise<PushTestAck | null>((done) => {
+      const finish = (): void => { clearTimeout(t); this.testWaiters.delete(n); done(last); };
+      const t = setTimeout(finish, waitMs);
+      this.testWaiters.set(n, (a) => { last = a; onStage(a); if (a.stage !== 'received') finish(); });
+      void this.send('pushtest', { n }).then((ok) => { if (!ok) finish(); });
+    });
   }
 
   /** the subscription can change (the browser rotates it); the computer always gets the current one while alerts are on */

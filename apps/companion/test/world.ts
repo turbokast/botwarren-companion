@@ -37,7 +37,7 @@ export interface World {
   daemon: Daemon;
   env: { BOTWARREN_COMPANION_HOME: string };
   /** pair a new simulated phone (the owner says yes at the computer) */
-  pairDevice(name?: string): Promise<SimDevice>;
+  pairDevice(name?: string, opts?: { caps?: string[] }): Promise<SimDevice>;
   hook(event: string, input: Record<string, unknown>): Promise<string | null>;
   channel(cwd?: string): Promise<Channel>;
   setConfig(patch: Record<string, unknown>): void;
@@ -52,19 +52,19 @@ export interface Channel {
   stop(): void;
 }
 
-export async function startWorld(o: { now?: () => number; clientDir?: string; push?: boolean } = {}): Promise<World> {
+export async function startWorld(o: { now?: () => number; clientDir?: string; push?: boolean; stateGapMs?: number; relay?: Partial<import('../../relay/src/relay.ts').RelayConfig> } = {}): Promise<World> {
   const dir = mkdtempSync(join(tmpdir(), 'bwc-'));
   const claudeDir = join(dir, 'claude');
   mkdirSync(join(claudeDir, 'projects', 'p'), { recursive: true });
   process.env.CLAUDE_CONFIG_DIR = claudeDir;
   const server = await generateIdentity(true);
   const push = o.push ? mockPush() : null;
-  const relay = new Relay({ port: 0, host: '127.0.0.1', ticketKeys: [server.pub], ...(o.clientDir ? { clientDir: o.clientDir } : {}), ...(push ? { push: { vapid: generateVapidKeys(), subject: 'mailto:test@example.com', fetchImpl: push.fetchImpl } } : {}) });
+  const relay = new Relay({ ...(o.relay ?? {}), port: 0, host: '127.0.0.1', ticketKeys: [server.pub], ...(o.clientDir ? { clientDir: o.clientDir } : {}), ...(push ? { push: { vapid: generateVapidKeys(), subject: 'mailto:test@example.com', fetchImpl: push.fetchImpl } } : {}) });
   const port = await relay.listen();
   relay.origin = `http://127.0.0.1:${port}`;
   const base = relay.origin;
   const env = { BOTWARREN_COMPANION_HOME: join(dir, 'home') };
-  const daemon = await startDaemon({ dir: env.BOTWARREN_COMPANION_HOME, env, ...(o.now ? { now: o.now } : {}) });
+  const daemon = await startDaemon({ dir: env.BOTWARREN_COMPANION_HOME, env, ...(o.now ? { now: o.now } : {}), ...(o.stateGapMs !== undefined ? { minStateGapMs: o.stateGapMs } : {}) });
   const { host, store } = daemon;
   const ticket = await signTicket(server, { v: 1, acct: 'acct-aaaaaaaaaaaaaaaa', host: host.hostId, hostSig: host.hostSigPub, iat: Date.now(), exp: Date.now() + 86_400_000 });
   store.writeJson('enrollment.json', { v: 1, relayUrl: base, ticket, acct: 'acct-aaaaaaaaaaaaaaaa' });
@@ -78,7 +78,7 @@ export async function startWorld(o: { now?: () => number; clientDir?: string; pu
 
   const world: World = {
     dir, claudeDir, relay, push, base, server, daemon, env,
-    async pairDevice(name = 'Sim phone') {
+    async pairDevice(name = 'Sim phone', opts = {} as { caps?: string[] }) {
       const link = await connectDaemon(env.BOTWARREN_COMPANION_HOME);
       if (!link) throw new Error('no daemon link');
       const confirmed = new Promise<{ sas: string }>((ok) => { link.onEvent((ev) => { if (ev.t === 'pair_confirm') { void link.request('pair_decision', { cid: ev.cid, ok: true }); ok({ sas: String(ev.sas) }); } }); });
@@ -89,6 +89,7 @@ export async function startWorld(o: { now?: () => number; clientDir?: string; pu
       if (host.sas !== sas) throw new Error(`SAS mismatch ${host.sas} vs ${sas}`);
       if (!(await finish())) throw new Error('pairing failed');
       link.close();
+      if (opts.caps) d.caps = opts.caps;
       d.connect();
       await d.waitFor(() => d.online);
       devices.push(d);

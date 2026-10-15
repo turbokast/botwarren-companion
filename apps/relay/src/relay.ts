@@ -35,7 +35,13 @@ export interface RelayConfig {
   queueTtlMs?: number;
   maxQueueFrames?: number;
   maxQueueBytes?: number;
+  /** frames without a replace key that one sender may have queued for one recipient (default 12): the oldest beyond it is dropped (counter `queue_trimmed`) */
+  maxUnkeyedPerSender?: number;
+  /** distinct replace keys one sender may have queued for one recipient (default 8) */
+  maxKeyedPerSender?: number;
   maxAcctQueuedFrames?: number;
+  /** frame rate limits (tests raise them; the defaults are the production values) */
+  rates?: { connBurst?: number; connPerSec?: number; acctBurst?: number; acctPerSec?: number };
   maxHostsPerAcct?: number;
   maxDevicesPerAcct?: number;
   maxConnections?: number;
@@ -98,7 +104,7 @@ export class Relay {
   private readonly queues = new Map<string, QItem[]>();
   private readonly acctQueued = new Map<string, number>();
   private readonly pairs = new Map<string, PairEntry>();
-  private readonly acctBucket = new KeyedLimiter(120, 10);
+  private readonly acctBucket: KeyedLimiter;
   private readonly ipConnect = new KeyedLimiter(20, 20 / 60);
   private readonly ipPair = new KeyedLimiter(10, 10 / 60);
   private readonly ipKey = new KeyedLimiter(30, 30 / 60);
@@ -111,6 +117,7 @@ export class Relay {
   constructor(cfg: RelayConfig) {
     this.cfg = { ...cfg };
     this.origin = cfg.origin ?? '';
+    this.acctBucket = new KeyedLimiter(cfg.rates?.acctBurst ?? 120, cfg.rates?.acctPerSec ?? 10);
     if (cfg.globalKill) this.kill.global = true;
   }
 
@@ -309,6 +316,7 @@ export class Relay {
     ws.on('message', (data: RawData, isBinary: boolean) => {
       if (isBinary) return ws.close(4400, 'binary');
       const text = data.toString('utf8');
+      if (!conn && text.length > 8192) { this.count('auth_too_big'); return ws.close(4400, 'too_big'); } // before authentication nothing is that big
       void (async () => {
         let msg: Record<string, unknown>;
         try { msg = JSON.parse(text) as Record<string, unknown>; } catch { this.count('bad_json'); return ws.close(4400, 'bad_json'); }
@@ -348,12 +356,12 @@ export class Relay {
     // a newer connection from the same key replaces the older one
     const old = this.conns.get(id);
     if (old) { this.count('conn_replaced'); this.closeConn(old, 4409, 'replaced'); }
-    const conn: Conn = { ws, role: msg.role, id, acct, host, pub, bucket: new TokenBucket(20, 2, now), pushBucket: new TokenBucket(5, 1 / 30, now), violations: 0 };
+    const conn: Conn = { ws, role: msg.role, id, acct, host, pub, bucket: new TokenBucket(this.cfg.rates?.connBurst ?? 20, this.cfg.rates?.connPerSec ?? 2, now), pushBucket: new TokenBucket(5, 1 / 30, now), violations: 0 };
     this.conns.set(id, conn);
     if (conn.role === 'device') { let s = this.devicesOfHost.get(host); if (!s) this.devicesOfHost.set(host, (s = new Set())); s.add(conn); }
     this.count(`auth_ok_${conn.role}`);
     const q = this.queues.get(id) ?? [];
-    ws.send(JSON.stringify({ t: 'ready', peerOnline: conn.role === 'device' ? this.conns.has(host) : (this.devicesOfHost.get(host)?.size ?? 0) > 0, queued: q.length }));
+    ws.send(JSON.stringify({ t: 'ready', peerOnline: conn.role === 'device' ? this.conns.has(host) : (this.devicesOfHost.get(host)?.size ?? 0) > 0, queued: q.length, maxFrame: MAX_FRAME_BYTES }));
     if (conn.role === 'host') this.presence(host, true);
     for (const it of q) if (it.x > this.now()) ws.send(it.raw);
     return conn;
@@ -436,13 +444,22 @@ export class Relay {
     const raw = JSON.stringify({ t: 'msg', h: frame.h, c: frame.c, s: frame.s });
     const bytes = raw.length;
     const q = this.queues.get(header.t) ?? [];
-    const maxFrames = this.cfg.maxQueueFrames ?? 100; const maxBytes = this.cfg.maxQueueBytes ?? 512 * 1024;
+    const maxFrames = this.cfg.maxQueueFrames ?? 100; const maxBytes = this.cfg.maxQueueBytes ?? 1024 * 1024;
     const acctMax = this.cfg.maxAcctQueuedFrames ?? 400;
     // newest wins per (sender, replace key): the older queued frame is superseded, not stacked (the key is in the signed header and says nothing about content)
     if (header.r) for (let i = q.length - 1; i >= 0; i--) if (q[i]!.f === header.f && q[i]!.r === header.r) { this.dequeue(header.t, q, i); this.count('queue_replaced'); }
     if ((this.acctQueued.get(c.acct) ?? 0) >= acctMax) return void this.reject(c, 'quota');
     q.push({ m: header.m, raw, bytes, x: Math.min(header.x, now + this.ttl), acct: c.acct, f: header.f, ...(header.r ? { r: header.r } : {}) });
     this.acctQueued.set(c.acct, (this.acctQueued.get(c.acct) ?? 0) + 1);
+    // one sender cannot fill a recipient's queue, whether its frames carry replace keys or not (a computer from before 0.1.2 sends a frame per event and
+    // no key): the newest few of each kind are kept, the older are dropped, and that is not an overflow
+    const capUn = this.cfg.maxUnkeyedPerSender ?? 12; const capKeyed = this.cfg.maxKeyedPerSender ?? 8;
+    for (const keyed of [false, true]) {
+      const cap = keyed ? capKeyed : capUn;
+      const idx: number[] = [];
+      q.forEach((x, i) => { if (x.f === header.f && !!x.r === keyed) idx.push(i); });
+      for (let k = 0; k < idx.length - cap; k++) { this.dequeue(header.t, q, idx[k]! - k); this.count('queue_trimmed'); }
+    }
     let total = q.reduce((n, x) => n + x.bytes, 0);
     // over capacity: drop the oldest frame that has no replace key first (the keyed one is already the newest of its kind), then the oldest of all
     while (q.length > maxFrames || total > maxBytes) {

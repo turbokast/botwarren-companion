@@ -1,6 +1,6 @@
 # Phone alerts: "An agent is waiting for you"
 
-Status: designed and built for version 0.1.2. Protocol details: [PROTOCOL.md](PROTOCOL.md) (kinds `push` and `pushack`, the replace key, the relay's `push` message). Licence of this document and the code it describes: Apache-2.0.
+Status: designed and built for version 0.1.2; made diagnosable in 0.1.3 (see "When alerts do not work"). Protocol details: [PROTOCOL.md](PROTOCOL.md) (kinds `push`, `pushack`, `pushtest` and `pushtestack`, the replace key, the relay's `push` message). Licence of this document and the code it describes: Apache-2.0.
 
 ## The problem
 
@@ -79,3 +79,13 @@ There is no per-project mute in the companion (the ship feature has them for shi
 ## Operating it (the relay)
 
 The relay offers alerts only if it has its own VAPID key pair (`RELAY_VAPID_PUBLIC_KEY`, `RELAY_VAPID_PRIVATE_KEY`, optional `RELAY_VAPID_SUBJECT`): see [RELAY.md](RELAY.md). Generate it **once**: a different key invalidates every phone's subscription (they must turn alerts off and on again). Without the pair the page does not offer alerts and says so. `POST /admin/push {"on":false}` switches alerts off at once without touching the secrets. The relay counts outcomes under fixed codes (`push_sent`, `push_gone`, `push_rate_limited`, ...) and never logs an endpoint or a body; a test plants canaries and finds none.
+
+## When alerts do not work (0.1.3)
+
+The first real-world test of 0.1.2 produced no alert, and the phone's Alerts card stayed on "Setting up" for ever. The cause was not in the browser: the **running** Companion on the computer was still version 0.1.1. An update replaces the files, but a background service keeps running the code it started with until it is restarted; 0.1.1 has no idea what a `push` message is, so it never answered, and the phone waited without a limit. What changed:
+
+* **Nothing waits without a limit.** Every awaited step of turning alerts on (the permission question, the relay's key, the worker file, registering and starting the worker, `subscribe()`, the computer's answer) has a time limit, and each way of ending has its own result and its own sentence on the card: permission refused or left unanswered, the relay unreachable or not set up for alerts, a worker that does not match its signature or cannot be downloaded or refused by the browser, Chrome's push service unreachable (retried once first), a permission withdrawn, a computer that is offline (the card says "Waiting for computer", the subscription is kept and sent when the computer returns), a computer that is online but silent, and a computer that **never answers the alerts question although it sends its state**: that one is an older Companion, and the card says so and names the restart command. A computer from 0.1.2 on answers every `sync` with `pushack`, which is how the page tells.
+* **Send a test alert.** On the Alerts card (when alerts are on): the phone asks its computer (`pushtest`), the computer seals a test alert for that phone's keys and hands it to the relay, the relay hands it to the push service, and the phone's worker shows "Botwarren: Test alert: alerts work on this phone" and tells the open page. The card reports each leg as it is confirmed (computer has it, push service has it, arrived) and, when one fails, which one. A test is limited to one every 10 seconds and ten an hour per phone and does not count against the real alerts' allowance. The test payload is `{"v":1,"k":"test","n":<the phone's own random id>}`, sealed like any alert.
+* **`botwarren-companion status` and `alerts` say when the running daemon is not the installed version** (the daemon reports its version), with the restart command for this computer's service manager. The installer says in plain words when it could not restart the service it moved to the new version.
+
+If the card says the computer is out of date: run `botwarren-companion status`, restart the Companion (Linux: `systemctl --user restart botwarren-companion`; macOS: `launchctl kickstart -k gui/$(id -u)/com.botwarren.companion`; Windows: sign out and in, or run `botwarren-companion daemon`), then press Try again.

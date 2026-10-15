@@ -4,9 +4,11 @@
  */
 import {
   KemKeyring, ReplayGuard, SendCounter, b64u, derivePairKeys, generateIdentity, openMessage, openOffer, openResult, parseCode, sealMessage, sealRequest, shortAuthString, unb64u, verifyDeviceCert,
-  type ActionData, type Frame, type Identity, type PushAckData, type PushSub, type Signed, type StateData,
+  DEVICE_REPLACE_KEYS, type ActionData, type Frame, type Identity, type PushAckData, type PushTestAck, type PushSub, type Signed, type StateData,
 } from '../src/protocol/index.ts';
 import { RelayConnection } from '../src/link/connection.ts';
+
+const replaceKey = (kind: string): string | undefined => (DEVICE_REPLACE_KEYS as Record<string, string>)[kind];
 
 export class SimDevice {
   id!: Identity;
@@ -23,6 +25,9 @@ export class SimDevice {
   results: { rid: string; outcome: string; note?: string }[] = [];
   kinds: string[] = [];
   acks: PushAckData[] = [];
+  testAcks: PushTestAck[] = [];
+  /** what this simulated page says it can read in its `sync` (the real page sends ["long1"]) */
+  caps: string[] = [];
   /** the header of every frame received (the relay's view: no content) */
   headers: { r?: string; n: number }[] = [];
   revoked = false;
@@ -70,7 +75,7 @@ export class SimDevice {
     const ws = this.base.replace(/^http/, 'ws') + '/v1/ws';
     this.conn = new RelayConnection({
       url: ws, role: 'device', identity: this.id, ticket: this.ticket, cert: this.cert, reconnect: false,
-      onState: (s) => { this.online = s === 'online'; if (s === 'online') setTimeout(() => { void this.send('sync', {}); }, 0); },
+      onState: (s) => { this.online = s === 'online'; if (s === 'online') setTimeout(() => { void this.send('sync', this.caps.length ? { caps: this.caps } : {}); }, 0); },
       onFrame: (f) => this.onFrame(f),
     });
     this.conn.start();
@@ -84,6 +89,7 @@ export class SimDevice {
     if (hd) this.headers.push({ n: hd.header.n, ...(hd.header.r ? { r: hd.header.r } : {}) });
     this.kinds.push(r.msg.kind);
     if (r.msg.kind === 'pushack') this.acks.push(r.msg.data as PushAckData);
+    if (r.msg.kind === 'pushtestack') this.testAcks.push(r.msg.data as PushTestAck);
     if (r.msg.kind === 'state') this.states.push(r.msg.data as StateData);
     else if (r.msg.kind === 'result') this.results.push(r.msg.data as { rid: string; outcome: string });
     else if (r.msg.kind === 'revoked') this.revoked = true;
@@ -95,7 +101,7 @@ export class SimDevice {
   async hostId(): Promise<string> { return (await import('../src/protocol/index.ts')).idOf(this.hostSig); }
 
   async send(kind: string, data: unknown, now = this.clock()): Promise<Frame> {
-    const frame = await sealMessage({ from: this.id, to: { id: await this.hostId(), kemPub: this.hostKem, epoch: this.hostEp }, seq: this.counter.next() + 1, now, ttlMs: 120_000, kind, data });
+    const frame = await sealMessage({ from: this.id, to: { id: await this.hostId(), kemPub: this.hostKem, epoch: this.hostEp }, seq: this.counter.next() + 1, now, ttlMs: 120_000, kind, data, ...(replaceKey(kind) ? { replace: replaceKey(kind)! } : {}) });
     this.conn!.sendFrame(frame);
     return frame;
   }

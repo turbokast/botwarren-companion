@@ -11,6 +11,8 @@
 var TITLE = 'Botwarren';
 var BODY = 'An agent is waiting for you';
 var RID = /^[a-z0-9-]{4,40}$/;
+var TEST_BODY = 'Test alert: alerts work on this phone';
+var TESTID = /^[A-Za-z0-9_-]{8,32}$/;
 
 self.addEventListener('install', function () { self.skipWaiting(); });
 self.addEventListener('activate', function (event) { event.waitUntil(self.clients.claim()); });
@@ -19,6 +21,15 @@ self.addEventListener('activate', function (event) { event.waitUntil(self.client
 function mustShow() {
   var ua = (self.navigator && self.navigator.userAgent) || '';
   return /Safari\//.test(ua) && !/Chrome|Chromium|Android|Edg\/|OPR\/|Firefox/.test(ua);
+}
+
+/** the phone's own "Send a test alert": returns its test id, or '' for anything else */
+function testId(event) {
+  try {
+    var d = event.data ? event.data.json() : null;
+    if (d && d.v === 1 && d.k === 'test' && typeof d.n === 'string' && TESTID.test(d.n)) return d.n;
+  } catch (e) { /* not a test */ }
+  return '';
 }
 
 function requestId(event) {
@@ -31,6 +42,14 @@ function requestId(event) {
 
 self.addEventListener('push', function (event) {
   event.waitUntil((async function () {
+    var test = testId(event);
+    if (test) {
+      // a test is always shown (the person is checking that notifications reach this phone), and the open page is told that it arrived
+      var open = await self.clients.matchAll({ type: 'window', includeUncontrolled: true });
+      for (var j = 0; j < open.length; j++) open[j].postMessage({ t: 'bw-test', n: test });
+      await self.registration.showNotification(TITLE, { body: TEST_BODY, tag: 'bw-test', data: { rid: '' } });
+      return;
+    }
     var rid = requestId(event);
     var wins = await self.clients.matchAll({ type: 'window', includeUncontrolled: true });
     for (var i = 0; i < wins.length; i++) wins[i].postMessage({ t: 'bw-waiting', rid: rid });

@@ -16,7 +16,7 @@ export interface ConnectionOptions {
   ticket: Signed;
   cert?: Signed;
   onFrame: (f: Frame) => void | Promise<void>;
-  onState?: (s: ConnState, info?: { peerOnline?: boolean; queued?: number }) => void;
+  onState?: (s: ConnState, info?: { peerOnline?: boolean; queued?: number; maxFrame?: number }) => void;
   onPresence?: (hostOnline: boolean) => void;
   onControl?: (msg: Record<string, unknown>) => void;
   /** send these control messages right after `ready` (e.g. the host's signed revocations) */
@@ -53,7 +53,7 @@ export class RelayConnection {
     this.setState('idle');
   }
 
-  private setState(s: ConnState, info?: { peerOnline?: boolean; queued?: number }): void { this.state = s; this.o.onState?.(s, info); }
+  private setState(s: ConnState, info?: { peerOnline?: boolean; queued?: number; maxFrame?: number }): void { this.state = s; this.o.onState?.(s, info); }
 
   get online(): boolean { return this.state === 'online'; }
 
@@ -93,7 +93,7 @@ export class RelayConnection {
       }
       case 'ready': {
         this.attempt = 0;
-        this.setState('online', { peerOnline: m.peerOnline === true, queued: typeof m.queued === 'number' ? m.queued : 0 });
+        this.setState('online', { peerOnline: m.peerOnline === true, queued: typeof m.queued === 'number' ? m.queued : 0, ...(typeof m.maxFrame === 'number' && Number.isFinite(m.maxFrame) ? { maxFrame: m.maxFrame } : {}) });
         this.o.onReady?.((x) => this.send(x));
         return;
       }

@@ -8,7 +8,8 @@ import { homedir } from 'node:os';
 import { randomBytes } from 'node:crypto';
 import { bindOf, type Option, type Pending, type SessionState, type StateData } from './protocol/index.ts';
 import { clip, maskSecrets } from './mask.ts';
-import { MAX_PREVIEW_CHARS, MAX_RECENT, MAX_RECENT_CHARS, MAX_SUMMARY_CHARS } from './protocol/messages.ts';
+import { cleanText } from './textclean.ts';
+import { MAX_PREVIEW_CHARS_LONG, MAX_RECENT, MAX_RECENT_CHARS_LONG, MAX_SUMMARY_CHARS_LONG } from './protocol/messages.ts';
 
 export interface Waiter { resolve: (d: { behavior: 'allow' | 'deny'; message?: string } | null) => void }
 
@@ -42,13 +43,20 @@ export interface Sess {
   status: SessionState['status'];
   since: number;
   pending?: PendingInternal;
-  recent: { role: 'assistant'; text: string; ts: number }[];
+  recent: { role: 'assistant'; text: string; ts: number; cut?: number }[];
   channel: { send: (ev: Record<string, unknown>) => boolean; pid: number } | null;
   /** the Claude process that spawned the channel server (matched against a hook's ancestors) */
   channelParent?: number;
   transcript?: string;
   lastEventAt: number;
   masked: number;
+}
+
+/** keeps the start of `s` (at most `max` characters, whole characters only) and says how many characters were cut from the end */
+export function cutEnd(s: string, max: number): { text: string; cut: number } {
+  if (s.length <= max) return { text: s, cut: 0 }; // (UTF-16 length is an upper bound of the character count)
+  const a = Array.from(s);
+  return a.length <= max ? { text: s, cut: 0 } : { text: a.slice(0, max).join(''), cut: a.length - max };
 }
 
 const sidOf = (): string => randomBytes(6).toString('hex');
@@ -79,14 +87,18 @@ export class SessionTable {
   /** a request the agent is waiting on; the bind covers exactly what the user will see */
   async setPending(s: Sess, p: { kind: Pending['kind']; tool?: string; summary: string; preview: string; options?: Option[]; ttlMs: number; route: AnswerRoute; can: { approve: boolean; reply: boolean }; optionText?: Record<string, string> }): Promise<PendingInternal> {
     const sec = this.secrets();
-    const sum = maskSecrets(p.summary, sec); const prev = maskSecrets(p.preview, sec);
+    const sum = maskSecrets(cleanText(p.summary), sec); const prev = maskSecrets(cleanText(p.preview), sec);
     s.masked += sum.masked + prev.masked;
     const rid = `${randomBytes(2).toString('hex')}-${randomBytes(3).toString('hex')}`;
-    const base = { rid, kind: p.kind, ...(p.tool ? { tool: clip(p.tool, 60) } : {}), summary: clip(sum.text, MAX_SUMMARY_CHARS), preview: clip(prev.text, MAX_PREVIEW_CHARS), ...(p.options && p.options.length ? { options: p.options.slice(0, 8) } : {}) };
+    // the full text up to the long limits (the form each device gets is made in stateview.ts); what was cut here is counted, never silent
+    const summary = cutEnd(sum.text, MAX_SUMMARY_CHARS_LONG); const preview = cutEnd(prev.text, MAX_PREVIEW_CHARS_LONG);
+    const base = { rid, kind: p.kind, ...(p.tool ? { tool: clip(p.tool, 60) } : {}), summary: summary.text, preview: preview.text, ...(p.options && p.options.length ? { options: p.options.slice(0, 8) } : {}) };
     const bind = await bindOf(base);
-    const pub: PendingCore = { ...base, expires: this.now() + p.ttlMs, bind };
+    const cut = summary.cut + preview.cut;
+    const pub: PendingCore = { ...base, ...(cut ? { cut } : {}), expires: this.now() + p.ttlMs, bind };
     this.clearPending(s, 'replaced');
-    s.pending = { pub, route: p.route, can: p.can, ...(p.optionText ? { optionText: p.optionText } : {}), ...(p.tool ? { tool: p.tool } : {}) };
+    // a request that could not be shown in full cannot be approved from a phone
+    s.pending = { pub, route: p.route, can: cut ? { ...p.can, approve: false } : p.can, ...(p.optionText ? { optionText: p.optionText } : {}), ...(p.tool ? { tool: p.tool } : {}) };
     this.setStatus(s, 'waiting');
     return s.pending;
   }
@@ -101,7 +113,7 @@ export class SessionTable {
 
   setRecent(s: Sess, texts: { text: string; ts: number }[]): void {
     const sec = this.secrets();
-    s.recent = texts.slice(-MAX_RECENT).map((t) => { const m = maskSecrets(t.text, sec); s.masked += m.masked; return { role: 'assistant' as const, text: clip(m.text.trim(), MAX_RECENT_CHARS), ts: t.ts }; }).filter((t) => t.text);
+    s.recent = texts.slice(-MAX_RECENT).map((t) => { const m = maskSecrets(cleanText(t.text), sec); s.masked += m.masked; const c = cutEnd(m.text.trim(), MAX_RECENT_CHARS_LONG); return { role: 'assistant' as const, text: c.text, ts: t.ts, ...(c.cut ? { cut: c.cut } : {}) }; }).filter((t) => t.text);
   }
 
   end(s: Sess): void { this.clearPending(s, 'ended'); this.setStatus(s, 'ended'); }
@@ -117,7 +129,9 @@ export class SessionTable {
 
   toState(rev: number, host: StateData['host'], presets: StateData['presets']): StateData {
     const sessions: SessionState[] = [...this.sessions.values()]
-      .sort((a, b) => Number(!!b.pending) - Number(!!a.pending) || b.lastEventAt - a.lastEventAt)
+      // waiting first, then by when the session last CHANGED (not by its last event: with several sessions busy, every tool call would reorder the list,
+      // which made every hook event a "changed" state and defeated the coalescing); the session id breaks ties so the order is stable
+      .sort((a, b) => Number(!!b.pending) - Number(!!a.pending) || b.since - a.since || (a.sid < b.sid ? -1 : a.sid > b.sid ? 1 : 0))
       .slice(0, 20)
       .map((s) => ({
         sid: s.sid, agent: s.agent, label: s.label, status: s.status, since: s.since,

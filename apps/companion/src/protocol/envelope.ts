@@ -21,10 +21,24 @@ export const DOMAIN = {
 } as const;
 
 export const HPKE_INFO = utf8('botwarren-link/v1/msg');
-export const MAX_FRAME_BYTES = 16 * 1024;
-export const MAX_INNER_BYTES = 8192 - 2;
+/** the biggest frame (the whole websocket text) a relay of this version accepts; a 0.1.2 relay accepts 16 KB: see `maxInnerFor` and the relay's `ready.maxFrame` */
+export const MAX_FRAME_BYTES = 96 * 1024;
+export const LEGACY_FRAME_BYTES = 16 * 1024;
+export const MAX_INNER_BYTES = 65_536 - 2;
 export const CLOCK_SKEW_MS = 120_000;
-export const BUCKETS = [256, 512, 1024, 2048, 4096, 8192] as const;
+/** padded sizes of the inner message. Up to 8192 is what every version understands; the three larger ones carry long messages (0.1.3) and are used only for a device that said it can read them */
+export const BUCKETS = [256, 512, 1024, 2048, 4096, 8192, 16_384, 32_768, 65_536] as const;
+export const LEGACY_INNER_BYTES = 8192 - 2;
+
+/** bytes of a websocket frame carrying a padded inner message of `bucket` bytes (HPKE enc 32 + tag 16, base64url, header 600 max, signature 86, JSON keys) */
+export const frameBytesFor = (bucket: number): number => Math.ceil(((bucket + 48) * 4) / 3) + 800;
+
+/** the largest inner message (JSON bytes) that still fits a relay whose frame limit is `maxFrame` (16 KB for a relay that does not say) */
+export function maxInnerFor(maxFrame: number): number {
+  let best = 0;
+  for (const b of BUCKETS) if (frameBytesFor(b) <= maxFrame) best = b - 2;
+  return Math.max(best, 0);
+}
 
 /**
  * `r` is the optional REPLACE KEY: an opaque, sender-chosen label (1 to 16 characters). The relay may drop an older queued frame of the same
@@ -41,7 +55,7 @@ const ID = /^[A-Za-z0-9_-]{43}$/;
 export function pad(payload: Bytes): Bytes {
   if (payload.length > MAX_INNER_BYTES) throw new Error('message too large');
   const need = payload.length + 2;
-  const size = BUCKETS.find((b) => b >= need) ?? 8192;
+  const size = BUCKETS.find((b) => b >= need) ?? 65_536;
   const out = new Uint8Array(size);
   out[0] = payload.length >>> 8; out[1] = payload.length & 0xff;
   out.set(payload, 2);

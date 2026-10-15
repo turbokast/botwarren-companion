@@ -3,7 +3,8 @@
  */
 import { Link, type Outcome } from './link.ts';
 import { ago, h, mount } from './ui.ts';
-import { clearShown, detectSupport, disable as disableAlerts, enable as enableAlerts, permission, wantsAlerts, type AlertResult, type SwPin } from './alerts.ts';
+import { clearShown, detectSupport, disable as disableAlerts, enable as enableAlerts, permission, sendTest, wantsAlerts, type AlertResult, type SwPin, type TestResult } from './alerts.ts';
+import { termBox } from './terminal.ts';
 import type { Pending, SessionState } from '../../src/protocol/index.ts';
 
 export interface BuildInfo { build: string; version: string; keyId: string; expires: string; sw?: SwPin }
@@ -12,14 +13,54 @@ type Tone = 'good' | 'warn' | 'bad' | 'info';
 const RID = /^[a-z0-9-]{4,40}$/;
 const ridFromHash = (): string | null => /^#\/r\/([a-z0-9-]{4,40})$/.exec(location.hash)?.[1] ?? null;
 
+const RESTART = 'On your computer run "botwarren-companion status": it says which version is running. Restart the Companion there (Linux: systemctl --user restart botwarren-companion; Mac or Windows: restart it or sign out and in), then try again.';
 const ALERT_RESULT: Record<AlertResult, { tone: Tone; text: string }> = {
-  ok: { tone: 'good', text: 'Alerts are set up on this phone.' },
+  ok: { tone: 'good', text: 'Alerts are on. You will get "An agent is waiting for you" when one needs you. Press "Send a test alert" to check one reaches this phone.' },
+  ok_host_off: { tone: 'warn', text: 'Your computer has this phone set up, but alerts are switched off on the computer itself. On your computer run: botwarren-companion alerts on' },
+  waiting_computer: { tone: 'warn', text: 'This phone is ready, but your computer cannot be reached right now, so nothing is confirmed yet. It is confirmed automatically when the computer is back online. Alerts are not working until then.' },
+  host_old: { tone: 'bad', text: `Your computer is online, but the Companion running there is an older version that does not know about alerts. ${RESTART}` },
+  host_silent: { tone: 'bad', text: `Your computer is online but did not answer within 12 seconds, so alerts are not confirmed. Try again. If it keeps happening: ${RESTART}` },
+  host_rejected: { tone: 'bad', text: 'Your computer refused this phone\'s alert address. Turn alerts off and on again. If it keeps happening, tell support@turbokast.com.' },
   denied: { tone: 'warn', text: 'Notifications are blocked for this site. Allow them in the browser or phone settings, then try again.' },
-  dismissed: { tone: 'warn', text: 'No permission was given, so alerts stay off.' },
+  dismissed: { tone: 'warn', text: 'No permission was given, so alerts stay off. Tap Turn alerts on and choose Allow.' },
+  prompt_timeout: { tone: 'warn', text: 'The permission question was not answered, so alerts stay off. Tap Turn alerts on and choose Allow.' },
+  relay_unreachable: { tone: 'bad', text: 'Could not reach the Botwarren relay to set up alerts. Check this phone is online, then try again.' },
   unavailable: { tone: 'warn', text: 'This relay is not set up to send alerts.' },
   bad_worker: { tone: 'bad', text: 'The alert helper on this page did not match its signature, so it was not started.' },
+  worker_unreachable: { tone: 'bad', text: 'The alert helper could not be downloaded. Check your connection and try again.' },
+  worker_register: { tone: 'bad', text: 'This browser refused to start the alert helper. Close other tabs of this page and try again. If it still fails, clear this site\'s data in the browser settings and pair again.' },
+  worker_timeout: { tone: 'bad', text: 'The alert helper did not start in time. Close and reopen this page, then try again.' },
+  push_service: { tone: 'bad', text: 'This phone could not reach its push service. Chrome on Android uses Google\'s: check you are online, that Data Saver and battery limits are off for Chrome, and that Google Play services is up to date, then try again.' },
+  subscribe_denied: { tone: 'warn', text: 'The browser would not allow alerts. In your phone settings, turn Notifications on for Chrome and for this site, then try again.' },
+  subscribe_timeout: { tone: 'bad', text: 'The phone\'s push service did not answer within 25 seconds. Check your connection and try again.' },
+  subscribe_failed: { tone: 'bad', text: 'This browser could not set up alerts. Try again. On iPhone, open this page from the Home Screen.' },
+  no_keys: { tone: 'bad', text: 'The browser gave back an incomplete alert address. Turn alerts off and on again.' },
   failed: { tone: 'bad', text: 'Could not turn alerts on in this browser. Try again. On iPhone, open this page from the Home Screen.' },
   unsupported: { tone: 'warn', text: 'This browser cannot show alerts.' },
+  insecure: { tone: 'warn', text: 'Alerts need a secure (https) page. Open the address your computer showed, which starts with https.' },
+};
+
+const TEST_RESULT: Record<TestResult, { tone: Tone; text: string }> = {
+  arrived: { tone: 'good', text: 'Test alert received. It went from this phone to your computer, to the push service, and back to this phone. Alerts work.' },
+  not_arrived: { tone: 'bad', text: 'The push service accepted the test, but nothing reached this phone within 15 seconds. Check that Notifications are allowed for Chrome and this site, and that battery saver or Data Saver is not blocking Chrome, then try again.' },
+  no_reply: { tone: 'bad', text: `Your computer did not answer the test. It may be offline, or its Companion is older than 0.1.2, or was not restarted after an update. ${RESTART}` },
+  no_subscription: { tone: 'warn', text: 'This phone has no alert address yet. Turn alerts on first.' },
+  no_permission: { tone: 'warn', text: 'Notifications are not allowed for this site. Allow them in the browser or phone settings, then try again.' },
+  alerts_off: { tone: 'warn', text: 'Alerts are switched off on your computer. On your computer run: botwarren-companion alerts on' },
+  rate_limited: { tone: 'warn', text: 'Too many tests. Wait ten seconds (at most ten an hour).' },
+  relay_off: { tone: 'warn', text: 'The relay cannot send alerts right now (it is switched off, or your computer lost its connection to it). Try again in a minute.' },
+  relay_busy: { tone: 'warn', text: 'The relay is limiting alerts for the moment. Wait a minute and try again.' },
+  bad_endpoint: { tone: 'bad', text: 'This phone\'s push address is not one the relay will call. Turn alerts off and on again.' },
+  push_gone: { tone: 'warn', text: 'The push service says this phone\'s alert address no longer exists. Turn alerts off and on again.' },
+  push_refused: { tone: 'bad', text: 'The push service refused the test. Turn alerts off and on again.' },
+  not_sent: { tone: 'bad', text: 'Your computer could not hand the test to the relay in time. Try again.' },
+  offline: { tone: 'warn', text: 'This phone is not connected to your computer. Wait for "Computer online", then try again.' },
+  unsupported: { tone: 'warn', text: 'This browser cannot show alerts.' },
+};
+const TEST_STEP: Record<'asked' | 'computer' | 'pushed', string> = {
+  asked: 'Test: asking your computer to send an alert...',
+  computer: 'Test: your computer has it. Handing it to the push service...',
+  pushed: 'Test: the push service has it. Waiting for it to reach this phone...',
 };
 
 type Screen = { t: 'pair'; prefill: string; error?: string } | { t: 'sas'; sas: string; note?: string } | { t: 'home' } | { t: 'card'; sid: string } | { t: 'devices' } | { t: 'gone'; why: string };
@@ -59,36 +100,59 @@ export async function start(info: BuildInfo): Promise<void> {
   function codeFromHash(): string { const m = /^#\/pair\/([0-9A-Za-z-]{16,24})$/.exec(location.hash); return m?.[1] ?? ''; }
 
   // ------------------------------------------------------------------ alerts
-  type AlertView = 'unsupported' | 'ios-install' | 'denied' | 'off' | 'pending' | 'host_off' | 'on';
+  type AlertView = 'unsupported' | 'ios-install' | 'insecure' | 'denied' | 'off' | 'working' | 'unconfirmed' | 'host_old' | 'waiting_computer' | 'host_off' | 'on';
+  let testBusy = false;
   function alertView(l: Link): AlertView {
     if (support !== 'ok') return support;
     if (permission() === 'denied') return 'denied';
     if (l.alerts?.on) return l.alerts.why === 'host_off' ? 'host_off' : 'on';
-    return wantsAlerts() && l.alerts === null ? 'pending' : 'off';
+    if (alertsBusy) return 'working';
+    if (!wantsAlerts()) return 'off';
+    // the person turned alerts on here and the computer has not confirmed: say why, never just "setting up"
+    if (l.hostLacksAlerts()) return 'host_old';
+    if (l.conn !== 'online' || l.hostOnline === false) return 'waiting_computer';
+    return Date.now() - l.connectedAt < 8000 ? 'working' : 'unconfirmed';
   }
+  const PILL: Record<AlertView, string> = { unsupported: 'Unavailable', 'ios-install': 'Off', insecure: 'Unavailable', denied: 'Off', off: 'Off', working: 'Working', unconfirmed: 'Not confirmed', host_old: 'Computer out of date', waiting_computer: 'Waiting for computer', host_off: 'Off on computer', on: 'On' };
 
   async function toggleAlerts(l: Link, on: boolean): Promise<void> {
     alertsBusy = true; alertNote = null; render();
-    if (on) {
-      const r = await enableAlerts(l, info.sw);
-      alertNote = r === 'ok' ? (l.alerts?.on ? { tone: 'good', text: 'Alerts are on. You will get "An agent is waiting for you" when one needs you.' } : { tone: 'warn', text: 'Alerts are set up on this phone. Your computer will start sending them once it is reachable.' }) : ALERT_RESULT[r];
-    } else { await disableAlerts(l); alertNote = { tone: 'info', text: 'Alerts are off on this phone.' }; }
+    try {
+      if (on) alertNote = ALERT_RESULT[await enableAlerts(l, info.sw)];
+      else { await disableAlerts(l); alertNote = { tone: 'info', text: 'Alerts are off on this phone.' }; }
+    } catch { alertNote = ALERT_RESULT.failed; } // nothing may leave the card on "working"
     alertsBusy = false; render();
+  }
+
+  async function runTest(l: Link): Promise<void> {
+    testBusy = true; alertNote = { tone: 'info', text: TEST_STEP.asked }; render();
+    try { const r = await sendTest(l, (st) => { alertNote = { tone: 'info', text: TEST_STEP[st] }; render(); }); alertNote = TEST_RESULT[r]; } catch { alertNote = TEST_RESULT.not_sent; }
+    testBusy = false; render();
   }
 
   function alertsCard(l: Link): HTMLElement {
     const v = alertView(l);
-    const on = v === 'on' || v === 'host_off' || v === 'pending';
-    const state = v === 'on' ? 'On' : v === 'pending' ? 'Setting up' : v === 'host_off' ? 'Off on computer' : 'Off';
+    const confirmed = v === 'on' || v === 'host_off';
+    const retry = v === 'unconfirmed' || v === 'host_old';
     const body: (HTMLElement | null)[] = [
-      h('div', { class: 'row between' }, h('b', {}, 'Alerts on this phone'), h('span', { class: v === 'on' ? 'pill live' : 'pill off', 'data-testid': 'alerts-state' }, state)),
+      h('div', { class: 'row between' }, h('b', {}, 'Alerts on this phone'), h('span', { class: v === 'on' ? 'pill live' : v === 'working' ? 'pill wait' : 'pill off', 'data-testid': 'alerts-state' }, PILL[v])),
       h('p', { class: 'fine' }, 'A notification that says only "An agent is waiting for you". It never shows your agents\' text, commands or project names, and your computer sends it without Botwarren being able to read it.'),
     ];
     if (v === 'ios-install') body.push(h('div', { class: 'callout warn', 'data-testid': 'alerts-ios' }, 'On iPhone and iPad, alerts work only from the Home Screen. Tap Share, then Add to Home Screen, open Botwarren Link from there, pair it again, and turn alerts on.'));
-    else if (v === 'unsupported') body.push(h('div', { class: 'callout warn' }, 'This browser cannot show alerts.'));
+    else if (v === 'unsupported') body.push(h('div', { class: 'callout warn' }, ALERT_RESULT.unsupported.text));
+    else if (v === 'insecure') body.push(h('div', { class: 'callout warn' }, ALERT_RESULT.insecure.text));
     else if (v === 'denied') body.push(h('div', { class: 'callout warn', 'data-testid': 'alerts-denied' }, ALERT_RESULT.denied.text));
-    else body.push(h('button', { class: on ? 'ghost full' : 'cta full', 'data-testid': 'alerts-toggle', disabled: alertsBusy, onclick: () => { void toggleAlerts(l, !on); } }, alertsBusy ? 'Working...' : on ? 'Turn alerts off' : 'Turn alerts on'));
-    if (v === 'host_off') body.push(h('div', { class: 'callout warn' }, 'Alerts are switched off on your computer. Switch them on there: botwarren-companion alerts on'));
+    else {
+      const turnOn = v === 'off' || retry;
+      body.push(h('button', { class: turnOn ? 'cta full' : 'ghost full', 'data-testid': 'alerts-toggle', disabled: alertsBusy || testBusy, onclick: () => { void toggleAlerts(l, turnOn); } },
+        alertsBusy ? 'Working...' : retry ? 'Try again' : turnOn ? 'Turn alerts on' : 'Turn alerts off'));
+      if (retry) body.push(h('button', { class: 'ghost full', 'data-testid': 'alerts-off', disabled: alertsBusy, onclick: () => { void toggleAlerts(l, false); } }, 'Turn alerts off'));
+      if (confirmed) body.push(h('button', { class: 'ghost full', 'data-testid': 'alerts-test', disabled: alertsBusy || testBusy, onclick: () => { void runTest(l); } }, testBusy ? 'Testing...' : 'Send a test alert'));
+    }
+    if (v === 'host_off' && !alertNote) body.push(h('div', { class: 'callout warn' }, ALERT_RESULT.ok_host_off.text));
+    if (v === 'host_old' && !alertNote) body.push(h('div', { class: 'callout bad', 'data-testid': 'alerts-host-old' }, ALERT_RESULT.host_old.text));
+    if (v === 'waiting_computer' && !alertNote) body.push(h('div', { class: 'callout warn', 'data-testid': 'alerts-waiting' }, ALERT_RESULT.waiting_computer.text));
+    if (v === 'unconfirmed' && !alertNote) body.push(h('div', { class: 'callout bad', 'data-testid': 'alerts-unconfirmed' }, ALERT_RESULT.host_silent.text));
     if (alertNote) body.push(h('div', { class: `callout ${alertNote.tone}`, role: 'status', 'data-testid': 'alerts-note' }, alertNote.text));
     return h('div', { class: 'card col', 'data-testid': 'alerts-card' }, ...body);
   }
@@ -177,6 +241,7 @@ export async function start(info: BuildInfo): Promise<void> {
       h('div', { class: 'row between' }, statusPill(l), h('span', { class: 'mini' }, st ? `${st.host.name} · updated ${ago(Date.now())}` : '')),
       st?.host.paused ? h('div', { class: 'callout bad' }, 'Remote answers are paused on your computer.') : null,
       notice ? h('div', { class: `callout ${notice.tone}`, role: 'status', 'data-testid': 'notice' }, notice.text) : null,
+      l.badState ? h('div', { class: 'callout warn', 'data-testid': 'bad-state' }, 'Your computer sent an update this page could not read, so what is shown may be out of date. Reload this page. If it keeps happening, the Companion on your computer and this page are different versions: update the Companion.') : null,
       alertsPrompt(l),
       h('p', { class: 'h3' }, `Waiting for you · ${waiting.length}`),
       ...(waiting.length ? waiting.map((s) => row(s)) : [h('p', { class: 'fine', 'data-testid': 'none-waiting' }, st ? 'Nothing is waiting for you.' : 'Waiting for your computer.')]),
@@ -191,7 +256,7 @@ export async function start(info: BuildInfo): Promise<void> {
     if (!s) return [h('div', { class: 'topbar' }, back, h('span', { class: 'wm' }, 'Gone')), h('div', { class: 'col page' }, h('div', { class: 'callout' }, 'This agent is no longer listed.'))];
     const p = s.pending as (Pending & { can: { approve: boolean; reply: boolean } }) | undefined;
     const bar = h('div', { class: 'topbar' }, back, h('span', { class: 'wm small' }, s.label), h('span', { class: 'spacer' }));
-    const messages = s.recent.map((m, i) => h('div', { class: `msg${p && i === s.recent.length - 1 ? ' ask' : ''}`, 'data-testid': 'recent' }, m.text));
+    const messages = s.recent.map((m, i) => termBox({ key: `${s.sid}:m:${m.ts}:${i}`, title: `Message ${i + 1} of ${s.recent.length}`, text: m.text, cut: m.cut, ask: !!p && i === s.recent.length - 1, testid: 'recent' }));
     const body: (HTMLElement | null)[] = [];
     const send = async (a: 'approve' | 'deny' | 'reply', opt?: string): Promise<void> => {
       if (!p) return;
@@ -205,7 +270,7 @@ export async function start(info: BuildInfo): Promise<void> {
     if (!p) body.push(h('div', { class: 'callout' }, s.status === 'working' ? 'Working. Nothing needs you right now.' : 'Not waiting for you.'));
     else if (p.kind === 'permission') {
       body.push(h('p', { class: 'eyebrow warm' }, p.tool ? 'Claude Code asks permission' : 'Claude Code is waiting for you'));
-      if (p.summary || p.preview) body.push(h('div', { class: 'panel col card' }, h('span', { class: 'lbl' }, p.tool ? `${p.summary} (${p.tool})` : p.summary), p.preview ? h('div', { class: 'term', 'data-testid': 'preview' }, p.preview) : null, h('p', { class: 'fine' }, 'Shown as plain text, exactly what your agent asked.')));
+      if (p.summary || p.preview) body.push(h('div', { class: 'panel col card' }, h('span', { class: 'lbl' }, p.tool ? `${p.summary} (${p.tool})` : p.summary), p.preview ? termBox({ key: `${s.sid}:p:${p.rid}`, title: p.tool ?? 'Request', text: p.preview, cut: p.cut, ask: true, testid: 'preview' }) : null, h('p', { class: 'fine' }, 'Shown as plain text, exactly what your agent asked.')));
     } else {
       body.push(h('p', { class: 'eyebrow warm' }, p.kind === 'question' ? 'Claude Code asks a question' : 'Claude Code is waiting for you'));
       if (p.kind === 'question' || p.kind === 'idle') body.push(h('div', { class: 'msg ask', 'data-testid': 'pending-summary' }, p.summary));
@@ -214,7 +279,7 @@ export async function start(info: BuildInfo): Promise<void> {
     const actions: HTMLElement[] = [];
     if (p && p.kind === 'permission') {
       if (p.can.approve) actions.push(h('div', { class: 'row gap' }, h('button', { class: 'no-btn', 'data-testid': 'deny', disabled: busy, onclick: () => { void send('deny'); } }, 'Deny'), h('button', { class: 'ok-btn', 'data-testid': 'approve', disabled: busy, onclick: () => { void send('approve'); } }, 'Approve')));
-      else actions.push(h('div', { class: 'callout warn', 'data-testid': 'terminal-only' }, 'Your computer cannot take an answer for this one from here. Answer at the terminal.'));
+      else actions.push(h('div', { class: 'callout warn', 'data-testid': 'terminal-only' }, p.cut ? 'This request is too long to show in full here, so it cannot be approved from your phone. Answer at the terminal.' : 'Your computer cannot take an answer for this one from here. Answer at the terminal.'));
     } else if (p) {
       if (p.can.reply) {
         if (p.options?.length) { actions.push(h('p', { class: 'h3' }, 'Its options')); for (const o of p.options) actions.push(h('button', { class: 'nx', 'data-testid': `opt-${o.id}`, disabled: busy, onclick: () => { void send('reply', o.id); } }, o.label)); }

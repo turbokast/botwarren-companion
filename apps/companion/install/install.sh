@@ -384,12 +384,13 @@ function installService(o, entry, { restart = false } = {}) {
     run('systemctl', ['--user', 'daemon-reload']);
     started = run('systemctl', ['--user', 'enable', '--now', SERVICE.systemd]);
     if (started && restart) started = run('systemctl', ['--user', 'restart', SERVICE.systemd]);
-    if (!started) o.log('    could not start it with systemd --user here. Start the daemon yourself: botwarren-companion daemon (leave it running)');
+    if (!started && restart) o.log('    !! COULD NOT RESTART the background service here (no systemd --user session?). The OLD version keeps running, with its old features, until you restart it yourself:\n       systemctl --user restart botwarren-companion');
+    else if (!started) o.log('    could not start it with systemd --user here. Start the daemon yourself: botwarren-companion daemon (leave it running)');
     else o.log('    running. (To keep it running when you are logged out: loginctl enable-linger $USER)');
   } else if (sp.kind === 'launchd') {
     const uid = String(process.getuid?.() ?? '');
     started = restart ? (run('launchctl', ['kickstart', '-k', `gui/${uid}/${SERVICE.launchd}`]) || run('launchctl', ['bootstrap', `gui/${uid}`, sp.file]) || run('launchctl', ['load', '-w', sp.file])) : (run('launchctl', ['bootstrap', `gui/${uid}`, sp.file]) || run('launchctl', ['load', '-w', sp.file]));
-    o.log(started ? '    running.' : '    could not start it with launchd here. Start the daemon yourself: botwarren-companion daemon (leave it running)');
+    o.log(started ? '    running.' : restart ? '    !! COULD NOT RESTART the background service here. The OLD version keeps running until you restart it yourself:\n       launchctl kickstart -k gui/$(id -u)/com.botwarren.companion' : '    could not start it with launchd here. Start the daemon yourself: botwarren-companion daemon (leave it running)');
   } else {
     o.log('    it starts the next time you sign in to Windows. To start it now: botwarren-companion daemon (leave the window open), or sign out and in.');
   }

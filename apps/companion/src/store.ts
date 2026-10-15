@@ -63,6 +63,8 @@ export const DeviceRecord = z.object({
   id: z.string(), name: z.string(), sig: z.string(), kem: z.string(), kemEpoch: z.number().int().min(0), cert: SignedSchema, pairedAt: z.number(), lastSeen: z.number().nullable(),
   /** this phone's Web Push subscription, sent by the phone inside the encrypted channel; absent = alerts off for this phone. Treat as a secret: it is the address of that phone. */
   push: PushSub.optional(),
+  /** what this phone's page said it can read (from its `sync`): absent = the first version's short form */
+  caps: z.array(z.string().max(12)).max(8).optional(),
 }).strict();
 export type DeviceRecord = z.infer<typeof DeviceRecord>;
 

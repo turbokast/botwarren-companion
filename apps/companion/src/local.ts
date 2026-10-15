@@ -3,6 +3,7 @@
  * home directory (a named pipe on Windows), never a network port. Every request carries the per-install secret from hook.secret.
  * Newline-delimited JSON. Licence: Apache-2.0.
  */
+import { VERSION } from './version.ts';
 import { createConnection, createServer, type Server, type Socket } from 'node:net';
 import { chmodSync, existsSync, renameSync, statSync, unlinkSync } from 'node:fs';
 import { timingSafeEqual, randomBytes } from 'node:crypto';
@@ -198,7 +199,7 @@ export class LocalServer {
         send({
           id, ok: true,
           status: {
-            relay: this.host.relayState, enrolled: this.host.store.enrollment() !== null, paused: cfg.paused, hostId: this.host.hostId,
+            version: VERSION, relay: this.host.relayState, enrolled: this.host.store.enrollment() !== null, paused: cfg.paused, hostId: this.host.hostId,
             devices: this.host.listDevices().map((d) => ({ id: d.id.slice(0, 8), name: d.name, lastSeen: d.lastSeen, pairedAt: d.pairedAt })),
             sessions: [...this.host.sessions.sessions.values()].map((s) => ({ label: s.label, status: s.status, waiting: !!s.pending, channel: !!s.channel, masked: s.masked })),
             alerts: { enabled: cfg.alerts.enabled, phones: this.host.listDevices().filter((d) => d.push).length },

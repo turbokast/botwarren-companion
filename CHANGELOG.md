@@ -6,6 +6,31 @@ A release is only built from a dated entry in this file: the release workflow ta
 
 ## [Unreleased]
 
+## [0.1.3] - 2026-10-15
+
+Fixes what the second real-world test found on an Android phone: alerts that never came and never said why, a relay queue that kept overflowing, and long messages cut at 600 characters. The relay needs the 0.1.3 image for long messages (against a 0.1.2 relay everything keeps working in the short form).
+
+### Added
+
+- **Send a test alert.** On the phone's Alerts card: phone to computer to relay to push service and back to the phone, with each leg reported as it is confirmed and, when one fails, which one (new message kinds `pushtest` and `pushtestack`; the test payload is sealed like any alert). One test every 10 seconds and ten an hour per phone; it does not use the real alerts' hourly allowance.
+- **Long messages, in a terminal view.** The "last things it said" and the pending request's command are shown in monospace on a dark terminal surface: whitespace and line breaks kept, colour codes removed, soft wrap with sideways scrolling for a word longer than the screen, a "No wrap" switch, Copy, Expand (up to 62% of the screen) and an own scroll area with a maximum height so Approve and Deny stay in reach. Expansion and scroll position survive redraws. Controls are at least 44 px. Design: Claude Design project, board "Companion Terminal View".
+- **Per-device capability.** A 0.1.3 page says `caps:["long1"]` in its `sync`; the computer then sends the long form (up to 24,000 characters per text, the whole state in one frame of at most 64 KB padded; new size buckets 16 KB, 32 KB, 64 KB). Text that still does not fit is cut at the END and the phone says how many characters were cut. A request whose command was cut cannot be approved from the phone. An older page (any 0.1.0 to 0.1.2 client, for instance an open tab) gets the short form as before, and cannot approve a request it only saw shortened.
+- The relay announces its frame limit in `ready` (`maxFrame`); the computer never sends a frame bigger than the relay it is connected to accepts, so a 0.1.3 computer against a 0.1.2 relay stays in the 8 KB form.
+- `botwarren-companion status` and `alerts` report the running daemon's version and warn, with the restart command for the computer's service manager, when it differs from the installed command.
+
+### Fixed
+
+- **Alerts: "Setting up" for ever.** The running Companion on the owner's computer was still 0.1.1 (the update had replaced the files, but nothing had restarted the background service), so it ignored the phone's `push` message and never answered, and the page waited without a limit and then claimed alerts were "set up". Every awaited step now has a time limit and a result that names the step that stopped, in plain words: permission refused or unanswered, relay unreachable or without alerts, worker file not matching its signature / not downloadable / refused / not starting, the browser's push service unreachable (Chrome's FCM; retried once), a withdrawn permission, an offline computer ("Waiting for computer", sent again by itself when it returns), a computer that is online but silent, and a computer that sends its state but never answers the alerts question (an older Companion: the card says so and names the restart command). The page also re-sends its subscription when the computer comes back online, not only when the page connects.
+- **The installer said "could not start" when it could not RESTART** a service it had moved to the new version, which hid that the old code kept running. It now says so loudly and names the restart command.
+- **Relay queue overflow (321 frames, 124 overflow drops with the phone away).** Two causes. (1) The running computer was the old 0.1.1 daemon, which sends a frame per hook event and no replace key. The relay now also caps what one sender may have queued for one recipient (the newest 12 frames without a key and 8 distinct keys; counter `queue_trimmed`, not an overflow), and the phone's own `sync`, `push` and `keyupdate` frames carry replace keys. (2) A real bug in 0.1.2 itself: the sessions in the state were ordered by their last EVENT, so with several busy sessions every tool call reordered the list, made the state "changed" and defeated the coalescing. They are now ordered by their last change of status, with a stable tie-break. A test simulates an hour of `PostToolUse` churn across three sessions with the phone away and finds at most three frames queued at the relay, no overflow.
+- Text from an agent is stripped of terminal colour codes, control characters and bidirectional overrides on the computer before it is sealed (so what is approved is what was shown), and again in the page.
+- The relay closes an unauthenticated socket that sends more than 8 KB.
+
+### Changed
+
+- The relay's per-recipient queue holds up to 1 MiB (was 512 KiB) because a long state frame can be 90 KB; per-sender caps keep it small.
+- `lastSeen` in the device list of the state is rounded to the minute, so a phone's own traffic does not count as a state change.
+
 ## [0.1.2] - 2026-10-15
 
 Fixes the problems found by the first real-world test (a phone that got no alert, a relay queue that overflowed, a command that could not reach a daemon that was running, Claude Code settings that broke on update, a prompt that silently did nothing without a terminal) and adds phone alerts.

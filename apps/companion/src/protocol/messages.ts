@@ -6,9 +6,19 @@ import { z } from 'zod';
 import { bs, hex, utf8 } from './bytes.ts';
 
 export const MAX_RECENT = 3;
+/** what a device that has not said it can read long messages gets (every 0.1.0 to 0.1.2 client): these are the limits of the first versions */
 export const MAX_RECENT_CHARS = 600;
 export const MAX_PREVIEW_CHARS = 1200;
 export const MAX_SUMMARY_CHARS = 300;
+/**
+ * Long messages (0.1.3), for a device that sent the capability `long1` with its `sync`: each shown text may be this long (in characters) and the whole
+ * state still has to fit one frame of at most 64 KB padded (see STATE_BUDGET_BYTES in the host). Text over a limit is cut at the END and the cut is
+ * reported in `cut` (never silently); a request whose preview was cut cannot be approved from the phone.
+ */
+export const MAX_RECENT_CHARS_LONG = 24_000;
+export const MAX_PREVIEW_CHARS_LONG = 24_000;
+export const MAX_SUMMARY_CHARS_LONG = 2_000;
+export const CAP_LONG = 'long1';
 
 export const Rid = z.string().regex(/^[a-z0-9-]{4,40}$/);
 export const Sid = z.string().regex(/^[a-z0-9]{6,24}$/);
@@ -20,8 +30,10 @@ export const PendingSchema = z.object({
   rid: Rid,
   kind: z.enum(['permission', 'question', 'idle']),
   tool: z.string().max(60).optional(),
-  summary: z.string().max(MAX_SUMMARY_CHARS),
-  preview: z.string().max(MAX_PREVIEW_CHARS),
+  summary: z.string().max(MAX_SUMMARY_CHARS_LONG),
+  preview: z.string().max(MAX_PREVIEW_CHARS_LONG),
+  /** characters the computer cut from the end of the preview (long1 devices only; absent = nothing cut) */
+  cut: z.number().int().min(1).optional(),
   options: z.array(OptionSchema).max(8).optional(),
   expires: z.number().int(),
   bind: z.string().regex(/^[0-9a-f]{64}$/),
@@ -30,7 +42,7 @@ export const PendingSchema = z.object({
 }).strict();
 export type Pending = z.infer<typeof PendingSchema>;
 
-export const RecentSchema = z.object({ role: z.enum(['assistant', 'user']), text: z.string().max(MAX_RECENT_CHARS), ts: z.number().int() }).strict();
+export const RecentSchema = z.object({ role: z.enum(['assistant', 'user']), text: z.string().max(MAX_RECENT_CHARS_LONG), ts: z.number().int(), cut: z.number().int().min(1).optional() }).strict();
 export const SessionSchema = z.object({
   sid: Sid,
   agent: z.enum(['claude-code', 'codex', 'ninox']),
@@ -74,7 +86,9 @@ export const KeyUpdateData = z.object({ ep: z.number().int().min(0), kem: z.stri
 export type KeyUpdateData = z.infer<typeof KeyUpdateData>;
 
 export const RevokedData = z.object({ reason: z.enum(['removed', 'account_off']) }).strict();
-export const SyncData = z.object({}).strict();
+/** `caps`: what this device can read beyond the first version (0.1.3 clients send ["long1"]); an older client sends {} and gets the short form */
+export const SyncData = z.object({ caps: z.array(z.string().regex(/^[a-z0-9]{1,12}$/)).max(8).optional() }).strict();
+export type SyncData = z.infer<typeof SyncData>;
 
 /**
  * Phone alerts (v1.1). The device registers its own Web Push subscription with the host INSIDE the encrypted channel; the host seals every alert
@@ -93,14 +107,29 @@ export const PushAckData = z.object({ on: z.boolean(), why: z.enum(['ok', 'off',
 export type PushAckData = z.infer<typeof PushAckData>;
 
 /** the payload of an alert, sealed for the device's subscription. There is nothing else in it: the service worker shows fixed words. */
-export const AlertPayload = z.object({ v: z.literal(1), k: z.literal('waiting'), r: z.string().regex(/^[a-z0-9-]{4,40}$/).optional() }).strict();
+export const AlertPayload = z.union([
+  z.object({ v: z.literal(1), k: z.literal('waiting'), r: z.string().regex(/^[a-z0-9-]{4,40}$/).optional() }).strict(),
+  /** the phone's "Send a test alert": `n` is the phone's own random id for it, echoed so the page knows which test arrived */
+  z.object({ v: z.literal(1), k: z.literal('test'), n: z.string().regex(/^[A-Za-z0-9_-]{8,32}$/) }).strict(),
+]);
 export type AlertPayload = z.infer<typeof AlertPayload>;
+
+/** phone to computer: "send me a test alert now" (computer answers `pushtestack` as it goes, then the alert itself arrives through the push service) */
+export const PushTestData = z.object({ n: z.string().regex(/^[A-Za-z0-9_-]{8,32}$/) }).strict();
+export type PushTestData = z.infer<typeof PushTestData>;
+export const PUSH_TEST_FAILS = ['alerts_off', 'no_subscription', 'rate_limited', 'relay_off', 'relay_busy', 'bad_endpoint', 'push_gone', 'push_refused', 'not_sent'] as const;
+/** received: the computer has the request; pushed: the relay handed the sealed alert to the push service; failed: it stopped, `why` says where */
+export const PushTestAck = z.object({ n: z.string().regex(/^[A-Za-z0-9_-]{8,32}$/), stage: z.enum(['received', 'pushed', 'failed']), why: z.enum(PUSH_TEST_FAILS).optional() }).strict();
+export type PushTestAck = z.infer<typeof PushTestAck>;
+export const TEST_REPLACE_KEY = 't';
 
 /** the replace key of every state frame: the newest one wins at the relay */
 export const STATE_REPLACE_KEY = 's';
 
-export const HOST_KINDS = ['state', 'result', 'keyupdate', 'revoked', 'pushack'] as const;
-export const DEVICE_KINDS = ['action', 'sync', 'keyupdate', 'push'] as const;
+export const HOST_KINDS = ['state', 'result', 'keyupdate', 'revoked', 'pushack', 'pushtestack'] as const;
+export const DEVICE_KINDS = ['action', 'sync', 'keyupdate', 'push', 'pushtest'] as const;
+/** replace keys of the device's own frames, so a computer that is away does not pile up a phone's reconnects (newest wins) */
+export const DEVICE_REPLACE_KEYS = { sync: 'y', push: 'p', keyupdate: 'k' } as const;
 
 export const DEFAULT_PRESETS: readonly Preset[] = [
   { id: 'continue', label: 'Continue' },

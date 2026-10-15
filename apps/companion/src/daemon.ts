@@ -17,6 +17,8 @@ export interface DaemonOptions {
   log?: (line: string) => void;
   /** how often the daemon checks that its socket file is still the one it created (ms; 0 = never; default 5000) */
   socketWatchMs?: number;
+  /** tests: the host's minimum gap between non-urgent state pushes (ms) */
+  minStateGapMs?: number;
   /** what is running (the daemon's own node, script and version): written to entry.json so Claude Code's hooks and channel, which use the stable launcher, run this version */
   entry?: { node: string; script: string; version: string };
 }
@@ -36,7 +38,7 @@ export async function startDaemon(o: DaemonOptions = {}): Promise<Daemon> {
   const hub = new ConfirmHub();
   const host = new CompanionHost({
     store, confirmer: (r) => hub.ask(r),
-    ...(o.now ? { now: o.now } : {}), ...(o.makeConnection ? { makeConnection: o.makeConnection } : {}), ...(o.env ? { env: o.env } : {}),
+    ...(o.now ? { now: o.now } : {}), ...(o.makeConnection ? { makeConnection: o.makeConnection } : {}), ...(o.env ? { env: o.env } : {}), ...(o.minStateGapMs !== undefined ? { minStateGapMs: o.minStateGapMs } : {}),
   });
   await host.init();
   const bridge = new ClaudeBridge(host);

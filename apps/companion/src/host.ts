@@ -7,13 +7,16 @@ import { z } from 'zod';
 import {
   ActionData, KemKeyring, ReplayGuard, SendCounter, StateData as StateSchema, b64u, derivePairKeys, exportIdentityPkcs8, formatCode, generateIdentity, importIdentityPkcs8, idOf, newPairingSecret,
   openMessage, openRequest, peekHeader, sealMessage, sealOffer, sealResult, shortAuthString, signDeviceCert, signRevocation, unb64u, importKemPrivatePkcs8, exportKemPrivatePkcs8,
-  KeyUpdateData, PAIR_TTL_MS, PushAckData, PushRegData, STATE_REPLACE_KEY, Ticket, type Frame, type Identity, type KemEntry, type Signed, type PairKeys, type StateData,
+  KeyUpdateData, PAIR_TTL_MS, PushAckData, PushRegData, PushTestData, STATE_REPLACE_KEY, SyncData, TEST_REPLACE_KEY, CAP_LONG, maxInnerFor, Ticket,
+  type Frame, type Identity, type KemEntry, type Signed, type PairKeys, type PushTestAck, type StateData,
 } from './protocol/index.ts';
+import { fitLong, toLegacy } from './stateview.ts';
 import { RelayConnection, type ConnectionOptions, type ConnState } from './link/connection.ts';
+import { LEGACY_FRAME_BYTES } from './protocol/index.ts';
 import { ActionLimiter, needsLocalConfirmation, relayAllowed } from './policy.ts';
 import { SessionTable, type Sess } from './sessions.ts';
 import { AlertPlanner, type Episode } from './alerts.ts';
-import { sealAlert } from './webpush.ts';
+import { sealAlert, sealTestAlert } from './webpush.ts';
 import { secretEnvValues } from './mask.ts';
 import type { Config, DeviceRecord, Store } from './store.ts';
 
@@ -39,6 +42,8 @@ export interface HostOptions {
   makeConnection?: (o: ConnectionOptions) => ConnectionLike;
   env?: Record<string, string | undefined>;
   onState?: (s: ConnState) => void;
+  /** at least this long between two state pushes that are not urgent (tests shorten it; default 2000) */
+  minStateGapMs?: number;
 }
 
 export const MAX_DEVICES = 8;
@@ -77,8 +82,11 @@ export class CompanionHost {
   private readonly alerts: AlertPlanner;
   private alertTimer: ReturnType<typeof setTimeout> | null = null;
   private alertQ = 0;
-  /** relay delivery requests in flight: request id -> device id */
-  private alertAsks = new Map<string, string>();
+  /** relay delivery requests in flight: request id -> device id (and the phone's test id when it is a test alert) */
+  private alertAsks = new Map<string, { dev: string; test?: string; timer?: ReturnType<typeof setTimeout> }>();
+  /** the biggest frame the relay we are connected to accepts (it says so in `ready`; a relay that does not say is a 0.1.2 relay: 16 KB) */
+  private relayMaxFrame = LEGACY_FRAME_BYTES;
+  private testLog = new Map<string, number[]>();
   private house: ReturnType<typeof setInterval> | null = null;
   private rev = 0;
 
@@ -144,7 +152,7 @@ export class CompanionHost {
     this.conn = make({
       url: ws, role: 'host', identity: this.identity, ticket: enr.ticket, reconnect: true,
       onFrame: (f) => this.onFrame(f),
-      onState: (s) => { this.connState = s; this.opts.onState?.(s); if (s === 'killed') this.store.audit('relay_killed'); },
+      onState: (s, info) => { this.connState = s; if (s === 'online') this.relayMaxFrame = info?.maxFrame ?? LEGACY_FRAME_BYTES; this.opts.onState?.(s); if (s === 'killed') this.store.audit('relay_killed'); },
       onControl: (m) => { void this.onControl(m); },
       onReady: (send) => {
         for (const r of this.store.state().revocations) send({ t: 'revoke', rev: r });
@@ -164,6 +172,7 @@ export class CompanionHost {
     if (this.house) clearInterval(this.house);
     if (this.pushTimer) clearTimeout(this.pushTimer);
     if (this.alertTimer) clearTimeout(this.alertTimer);
+    for (const a of this.alertAsks.values()) if (a.timer) clearTimeout(a.timer);
     this.pushTimer = null; this.alertTimer = null;
     for (const s of this.sessions.sessions.values()) this.sessions.clearPending(s, 'stop');
   }
@@ -252,16 +261,20 @@ export class CompanionHost {
     return this.conn.sendFrame(frame);
   }
 
-  buildState(rev = this.rev): StateData {
+  /**
+   * The state as one device gets it: `long` for a page that said it can read long messages (and a relay that carries big frames), otherwise the short
+   * form every version understands (see stateview.ts). Every form stays inside one padded frame.
+   */
+  buildState(rev = this.rev, long = false): StateData {
     const cfg = this.store.config();
     const presets = cfg.presets.map((p) => ({ id: p.id, label: p.label }));
-    let st = this.sessions.toState(rev, { name: cfg.name, paused: cfg.paused, confirm: cfg.confirm, devices: this.devices.map((d) => ({ id8: d.id.slice(0, 8), name: d.name, lastSeen: d.lastSeen })) }, presets);
-    // stay inside one padded bucket: drop the oldest context first, then whole sessions
-    const size = (s: StateData): number => new TextEncoder().encode(JSON.stringify(s)).length;
-    if (size(st) > 7500) st = { ...st, sessions: st.sessions.map((s) => ({ ...s, recent: s.recent.slice(-1) })) };
-    while (size(st) > 7500 && st.sessions.length > 1) st = { ...st, sessions: st.sessions.slice(0, -1) };
-    return StateSchema.parse(st);
+    const full = this.sessions.toState(rev, { name: cfg.name, paused: cfg.paused, confirm: cfg.confirm, devices: this.devices.map((d) => ({ id8: d.id.slice(0, 8), name: d.name, lastSeen: d.lastSeen === null ? null : Math.floor(d.lastSeen / 60_000) * 60_000 })) }, presets);
+    return StateSchema.parse(long ? fitLong(full, this.longBudget()) : toLegacy(full));
   }
+
+  /** JSON bytes the long form may take: what the relay's frame limit allows, less the envelope around the state */
+  private longBudget(): number { return Math.min(65_534, maxInnerFor(this.relayMaxFrame)) - 220; }
+  private canLong(d: DeviceRecord): boolean { return !!d.caps?.includes(CAP_LONG) && this.longBudget() > 8000; }
 
   /**
    * COALESCED. Many hook events (every tool call fires one) become at most one state message per 2 seconds, and a state that has not changed since
@@ -271,7 +284,7 @@ export class CompanionHost {
    */
   schedulePush(delayMs = 150): void {
     this.checkAlerts();
-    const wait = delayMs === 0 ? 0 : Math.max(delayMs, this.lastPushAt + MIN_STATE_GAP_MS - this.now());
+    const wait = delayMs === 0 ? 0 : Math.max(delayMs, this.lastPushAt + (this.opts.minStateGapMs ?? MIN_STATE_GAP_MS) - this.now());
     const due = this.now() + wait;
     if (this.pushTimer) { if (this.pushDue <= due) return; clearTimeout(this.pushTimer); }
     this.pushDue = due;
@@ -282,14 +295,22 @@ export class CompanionHost {
   /** sends the current state to every device whose last state differs (or to `only`; `force` sends it even if unchanged, e.g. when a device asks to sync) */
   async pushState(only?: DeviceRecord, force = false): Promise<void> {
     if (!this.conn?.online) return;
-    const probe = this.buildState();
-    const sig = JSON.stringify({ ...probe, rev: 0 });
-    const targets = (only ? [only] : this.devices).filter((d) => force || this.lastSig.get(d.id) !== sig);
+    const forms = new Map<boolean, { st: StateData; sig: string }>();
+    const form = (long: boolean): { st: StateData; sig: string } => {
+      let f = forms.get(long);
+      if (!f) { const st = this.buildState(this.rev, long); f = { st, sig: JSON.stringify({ ...st, rev: 0 }) }; forms.set(long, f); }
+      return f;
+    };
+    // the signature includes the form, so a phone that just said it can read long messages gets its state again in that form
+    const targets = (only ? [only] : this.devices).filter((d) => force || this.lastSig.get(d.id) !== form(this.canLong(d)).sig);
     if (targets.length === 0) return;
     this.rev += 1; this.lastPushAt = this.now();
     const st = this.store.state(); st.rev = this.rev; this.store.saveState(st);
-    const data = { ...probe, rev: this.rev };
-    for (const d of targets) { this.lastSig.set(d.id, sig); await this.sendTo(d, 'state', data, STATE_TTL_MS, STATE_REPLACE_KEY).catch(() => undefined); }
+    for (const d of targets) {
+      const f = form(this.canLong(d));
+      this.lastSig.set(d.id, f.sig);
+      await this.sendTo(d, 'state', { ...f.st, rev: this.rev }, STATE_TTL_MS, STATE_REPLACE_KEY).catch(() => undefined);
+    }
   }
 
   // ------------------------------------------------------------------ phone alerts
@@ -330,8 +351,7 @@ export class CompanionHost {
       let body: Buffer;
       try { body = sealAlert(d.push!, rid ?? undefined); } catch { this.store.audit('alert_not_sealed', { device: d.id.slice(0, 8) }); continue; }
       const q = `a${(this.alertQ = (this.alertQ + 1) % 1_000_000).toString(36)}`;
-      this.alertAsks.set(q, d.id);
-      if (this.alertAsks.size > 64) this.alertAsks.delete(this.alertAsks.keys().next().value as string);
+      this.rememberAsk(q, { dev: d.id });
       if (this.conn.send({ t: 'push', q, ep: d.push!.endpoint, body: b64u(body), ttl: ALERT_TTL_S, urgency: 'high', topic: ALERT_TOPIC })) n++;
     }
     if (n === 0) return false;
@@ -340,17 +360,56 @@ export class CompanionHost {
     return true;
   }
 
+  private rememberAsk(q: string, a: { dev: string; test?: string; timer?: ReturnType<typeof setTimeout> }): void {
+    this.alertAsks.set(q, a);
+    if (this.alertAsks.size > 64) { const k = this.alertAsks.keys().next().value as string; const old = this.alertAsks.get(k); if (old?.timer) clearTimeout(old.timer); this.alertAsks.delete(k); }
+  }
+
   /** the relay's answer to a delivery request */
   private onPushResult(m: Record<string, unknown>): void {
-    const dev = typeof m.q === 'string' ? this.alertAsks.get(m.q) : undefined;
+    const ask = typeof m.q === 'string' ? this.alertAsks.get(m.q) : undefined;
     if (typeof m.q === 'string') this.alertAsks.delete(m.q);
-    if (m.ok === true) return;
-    if (m.gone === true && dev) {
-      const d = this.devices.find((x) => x.id === dev);
-      if (d?.push) { delete d.push; this.store.saveDevices(this.devices); this.store.audit('alert_subscription_gone', { device: d.id.slice(0, 8) }); }
+    if (ask?.timer) clearTimeout(ask.timer);
+    const d = ask ? this.devices.find((x) => x.id === ask.dev) : undefined;
+    const why = typeof m.why === 'string' ? m.why.slice(0, 20) : 'unknown';
+    if (m.ok === true) { if (ask?.test && d) void this.testAck(d, { n: ask.test, stage: 'pushed' }); return; }
+    if (m.gone === true && d) {
+      if (d.push) { delete d.push; this.store.saveDevices(this.devices); this.store.audit('alert_subscription_gone', { device: d.id.slice(0, 8) }); }
+      if (ask?.test) void this.testAck(d, { n: ask.test, stage: 'failed', why: 'push_gone' });
       return;
     }
-    this.store.audit('alert_not_delivered', { why: typeof m.why === 'string' ? m.why.slice(0, 20) : 'unknown' });
+    this.store.audit('alert_not_delivered', { why });
+    if (ask?.test && d) void this.testAck(d, { n: ask.test, stage: 'failed', why: why === 'disabled' ? 'relay_off' : why === 'rate_limited' ? 'relay_busy' : why === 'bad_endpoint' ? 'bad_endpoint' : 'push_refused' });
+  }
+
+  private async testAck(dev: DeviceRecord, ack: PushTestAck): Promise<void> {
+    await this.sendTo(dev, 'pushtestack', ack, 2 * 60_000, TEST_REPLACE_KEY).catch(() => undefined);
+  }
+
+  /**
+   * "Send a test alert" from a phone: the same path a real alert takes (seal for that phone's own keys, hand to the relay, push service, phone), with
+   * answers back as it goes: `received` (this computer has the request), `pushed` (the relay's push service accepted it) or `failed` with where it stopped.
+   * Not part of the hourly alert allowance, but limited itself: one every 10 s and 10 an hour per phone.
+   */
+  private async onPushTest(dev: DeviceRecord, data: unknown): Promise<void> {
+    const r = PushTestData.safeParse(data);
+    if (!r.success) { this.store.audit('pushtest_rejected', { device: dev.id.slice(0, 8) }); return; }
+    const n = r.data.n; const t = this.now();
+    const log = (this.testLog.get(dev.id) ?? []).filter((x) => t - x < 3_600_000);
+    if (log.length >= 10 || (log.length > 0 && t - log[log.length - 1]! < 10_000)) { this.testLog.set(dev.id, log); return this.testAck(dev, { n, stage: 'failed', why: 'rate_limited' }); }
+    log.push(t); this.testLog.set(dev.id, log);
+    await this.testAck(dev, { n, stage: 'received' });
+    if (!dev.push) return this.testAck(dev, { n, stage: 'failed', why: 'no_subscription' });
+    if (!this.store.config().alerts.enabled) return this.testAck(dev, { n, stage: 'failed', why: 'alerts_off' });
+    if (!this.conn?.online) return this.testAck(dev, { n, stage: 'failed', why: 'relay_off' });
+    let body: Buffer;
+    try { body = sealTestAlert(dev.push, n); } catch { this.store.audit('alert_not_sealed', { device: dev.id.slice(0, 8) }); return this.testAck(dev, { n, stage: 'failed', why: 'not_sent' }); }
+    const q = `a${(this.alertQ = (this.alertQ + 1) % 1_000_000).toString(36)}`;
+    const timer = setTimeout(() => { if (this.alertAsks.delete(q)) void this.testAck(dev, { n, stage: 'failed', why: 'not_sent' }); }, 20_000);
+    timer.unref?.();
+    this.rememberAsk(q, { dev: dev.id, test: n, timer });
+    if (!this.conn.send({ t: 'push', q, ep: dev.push.endpoint, body: b64u(body), ttl: 120, urgency: 'high', topic: ALERT_TOPIC })) { this.alertAsks.delete(q); clearTimeout(timer); return this.testAck(dev, { n, stage: 'failed', why: 'relay_off' }); }
+    this.store.audit('alert_test_sent', { device: dev.id.slice(0, 8) });
   }
 
   /** a phone turns alerts on or off (inside the encrypted channel) and is told what the computer now has */
@@ -383,8 +442,15 @@ export class CompanionHost {
     const dev = this.devices.find((d) => d.id === r.msg.from)!;
     dev.lastSeen = this.now(); this.store.saveDevices(this.devices);
     switch (r.msg.kind) {
-      case 'sync': { await this.pushState(dev, true); return this.sendAck(dev); }
+      case 'sync': {
+        const c = SyncData.safeParse(r.msg.data);
+        const caps = c.success ? (c.data.caps ?? []) : [];
+        if (JSON.stringify(caps) !== JSON.stringify(dev.caps ?? [])) { if (caps.length) dev.caps = caps; else delete dev.caps; this.store.saveDevices(this.devices); }
+        await this.pushState(dev, true);
+        return this.sendAck(dev);
+      }
       case 'push': return this.onPushReg(dev, r.msg.data);
+      case 'pushtest': return this.onPushTest(dev, r.msg.data);
       case 'keyupdate': {
         const k = KeyUpdateData.safeParse(r.msg.data);
         if (!k.success || k.data.ep <= dev.kemEpoch) return;
