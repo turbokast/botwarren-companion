@@ -277,8 +277,10 @@ describe.skipIf(posixOnly)('item 3: enrol waits for the service-restarted daemon
     const { run: runCommand } = await import('../src/commands.ts');
     const root = tmp(); const home = join(root, 'companion'); const userHome = join(root, 'user');
     // a service unit exists on this (pretend) computer; HOME and XDG point at the temporary folder so no real unit is ever seen
-    mkdirSync(join(userHome, '.config', 'systemd', 'user'), { recursive: true });
-    writeFileSync(join(userHome, '.config', 'systemd', 'user', 'botwarren-companion.service'), '');
+    // (the unit lives in a different place per platform: launchd's LaunchAgents folder on macOS, the systemd user folder elsewhere)
+    const unitDir = process.platform === 'darwin' ? join(userHome, 'Library', 'LaunchAgents') : join(userHome, '.config', 'systemd', 'user');
+    mkdirSync(unitDir, { recursive: true });
+    writeFileSync(join(unitDir, process.platform === 'darwin' ? 'com.botwarren.companion.plist' : 'botwarren-companion.service'), '');
     const saved = { env: process.env.BOTWARREN_COMPANION_HOME, home: process.env.HOME, xdg: process.env.XDG_CONFIG_HOME, tty: Object.getOwnPropertyDescriptor(process.stdin, 'isTTY') };
     process.env.BOTWARREN_COMPANION_HOME = home; process.env.HOME = userHome; delete process.env.XDG_CONFIG_HOME;
     Object.defineProperty(process.stdin, 'isTTY', { value: true, configurable: true });
