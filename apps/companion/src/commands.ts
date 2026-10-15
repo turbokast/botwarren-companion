@@ -13,7 +13,7 @@ import { Ticket, unb64u } from './protocol/index.ts';
 import { HOOK_EVENTS, hasOurHooks, readSettings, settingsPath, simpleDiff, withHooks, withoutHooks, writeSettings } from './claude/settings.ts';
 import { CHANNEL_NAME } from './claude/channel.ts';
 
-export const VERSION = '0.1.0';
+export const VERSION = '0.1.1';
 
 export interface Ctx { script: string; node: string; ask: (q: string) => Promise<string> }
 
@@ -42,7 +42,7 @@ export async function run(argv: string[], ctx: Ctx): Promise<number> {
     case 'version': case '--version': out(VERSION); return 0;
     case 'daemon': return daemon();
     case 'init': return init(dir, has(argv, '--json'));
-    case 'enroll': return enroll(dir);
+    case 'enroll': return enroll(dir, ctx);
     case 'pair': return pair(dir);
     case 'status': return status(dir);
     case 'devices': return devices(dir, argv.slice(1));
@@ -61,7 +61,7 @@ Opt-in, end-to-end encrypted remote approvals for your coding agents (Apache-2.0
 
   daemon                 run the companion in the foreground
   init [--json]          create this computer's key (prints the public key)
-  enroll                 save the enrolment (JSON on stdin; written by your ship agent)
+  enroll                 save the enrolment: paste it from your account page (at a terminal), or JSON on stdin (your ship agent does this)
   pair                   show a code and QR to pair a phone (confirm the phone here)
   status                 relay, devices, sessions
   devices                list paired devices;  devices revoke <name>
@@ -92,14 +92,29 @@ async function init(dir: string, json: boolean): Promise<number> {
   return 0;
 }
 
-async function enroll(dir: string): Promise<number> {
+/**
+ * Saves the enrolment: JSON on stdin (the ship agent writes it), or, at a terminal, pasted from the Botwarren account page ("Enrol a computer"), for an
+ * install without a ship agent. The page needs only this computer's PUBLIC key, which is printed here; nothing secret is pasted anywhere.
+ */
+async function enroll(dir: string, ctx: Ctx): Promise<number> {
   const store = new Store(dir);
   const host = new CompanionHost({ store, confirmer: async () => false });
   await host.init();
-  const chunks: Buffer[] = [];
-  for await (const c of process.stdin) chunks.push(c as Buffer);
+  let raw: string;
+  const typed = process.stdin.isTTY === true;
+  if (typed) {
+    out('Enrol this computer with your Botwarren account (for remote approvals).');
+    out('  1. Open https://botwarren.com/account and find "Remote approvals" (it is there once your account has been enabled and you agreed).');
+    out('  2. Choose "Enrol a computer" and paste this computer\'s public key (not secret):');
+    out(); out(`     ${host.hostSigPub}`); out();
+    raw = await ctx.ask('  3. Paste the enrolment text the page shows, then press Enter: ');
+  } else {
+    const chunks: Buffer[] = [];
+    for await (const c of process.stdin) chunks.push(c as Buffer);
+    raw = Buffer.concat(chunks).toString('utf8');
+  }
   let e;
-  try { e = EnrollmentSchema.parse(JSON.parse(Buffer.concat(chunks).toString('utf8'))); } catch { process.stderr.write('enrolment is not valid\n'); return 1; }
+  try { e = EnrollmentSchema.parse(JSON.parse(raw.trim())); } catch { process.stderr.write('enrolment is not valid\n'); return 1; }
   let ticket;
   try { ticket = Ticket.parse(JSON.parse(new TextDecoder().decode(unb64u(e.ticket.j)))); } catch { process.stderr.write('ticket is not valid\n'); return 1; }
   if (ticket.host !== host.hostId) { process.stderr.write('this ticket is for another computer\n'); return 1; }
@@ -108,6 +123,12 @@ async function enroll(dir: string): Promise<number> {
   store.writeJson('enrollment.json', e);
   store.audit('enrolled', { acct: ticket.acct.slice(0, 6) });
   out('enrolled. (re)start the daemon to connect.');
+  if (typed) {
+    // a service manager (or the ship agent) starts it again with the enrolment; with none, start it yourself
+    const l = await link(dir);
+    if (l) { await l.request('shutdown'); l.close(); out('The running daemon was stopped so it restarts with the enrolment (a service restarts it; otherwise run: botwarren-companion daemon).'); }
+    else out('Start the daemon with: botwarren-companion daemon (leave it running; the installer\'s --service does this for you), then pair a phone with: botwarren-companion pair');
+  }
   return 0;
 }
 

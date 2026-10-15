@@ -15,7 +15,7 @@ import type { Readable, Writable } from 'node:stream';
 import { homeDir, socketPath } from '../paths.ts';
 
 export const CHANNEL_NAME = 'botwarren-companion';
-const VERSION = '0.1.0';
+const VERSION = '0.1.1';
 
 export const INSTRUCTIONS =
   'Botwarren Companion lets the user answer you from their own phone. Events arrive as <channel source="botwarren-companion" ...>. ' +

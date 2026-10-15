@@ -36,7 +36,7 @@ This records how `turbokast/botwarren-companion` is to be configured on GitHub a
 | Require actions to be pinned to a full commit SHA | on | A moved tag cannot change what runs |
 | Default workflow token | read-only; workflows may not approve pull requests | Each job asks for what it needs |
 | Fork pull request workflows | need approval for first-time contributors | |
-| Environment `release` | required reviewer (the maintainer), deployment tags limited to `v*`; holds the R2 secrets | [RELEASING.md](RELEASING.md) |
+| Environment `release` | required reviewer (the maintainer), deployments limited to `v*` tags and the `main` branch (the scheduled re-sign); holds the R2 secrets | [RELEASING.md](RELEASING.md) |
 | Variables | `GCP_WORKLOAD_IDENTITY_PROVIDER`, `GCP_SERVICE_ACCOUNT`, `RELEASE_SIGNING` (= `kms`), optional `RELEASE_EPOCH` | Names of public resources, not secrets |
 | Secrets | `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY`, `R2_ENDPOINT`, **only** in the `release` environment | Never repository or organisation secrets |
 
@@ -104,6 +104,8 @@ gh api -X PUT "repos/${REPO}/environments/release" --input - <<JSON
 { "reviewers": [ { "type": "User", "id": ${ME} } ], "deployment_branch_policy": { "protected_branches": false, "custom_branch_policies": true } }
 JSON
 gh api -X POST "repos/${REPO}/environments/release/deployment-branch-policies" -f name='v*' -f type=tag
+# the scheduled re-sign (resign.yml) runs on main in the same environment, behind the same approval (see RELEASING.md, "The scheduled re-sign"; Google's provider condition must allow it too)
+gh api -X POST "repos/${REPO}/environments/release/deployment-branch-policies" -f name='main' -f type=branch
 # secrets live ONLY in the environment (prompted; never put a value on the command line or in a file in the repository)
 gh secret set R2_ACCESS_KEY_ID --env release --repo "${REPO}"
 gh secret set R2_SECRET_ACCESS_KEY --env release --repo "${REPO}"

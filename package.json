@@ -1,6 +1,6 @@
 {
   "name": "botwarren-companion",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "private": true,
   "description": "Botwarren Companion: opt-in, end-to-end encrypted remote approvals for your coding agents (the companion, the relay and the signed web client).",
   "license": "Apache-2.0",

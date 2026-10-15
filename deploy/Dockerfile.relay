@@ -23,6 +23,9 @@ ENV NODE_ENV=production PORT=8080 RELAY_CLIENT_DIR=/srv/client
 WORKDIR /srv
 COPY --from=build /app /srv
 COPY client /srv/client
+# the relay runs as a non-root user, so everything it serves or imports must be world-readable whatever modes the build context had
+# (an extracted release context can carry 0700 directories)
+RUN chmod -R a+rX /srv
 RUN useradd --uid 10001 --create-home relay
 USER relay
 EXPOSE 8080

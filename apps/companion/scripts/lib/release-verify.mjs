@@ -9,6 +9,7 @@
  *   component-manifest.json(.sig)  signed (domain botwarren-component-v1) with the agent's own verifier; its bundle hash and size equal the zip
  *   companion-<v>.zip           holds exactly companion.mjs, VERSION, LICENSE, NOTICE (the files the ship agent will extract), VERSION equals the release
  *   relay-context-<v>.tar.gz    its CONTEXT.json hashes match its files; its client/ is byte-identical to the signed client
+ *   install.sh, install.ps1     the manual installers (for a computer without a ship agent): each embeds every pinned PRODUCTION component key
  *
  * Licence: Apache-2.0.
  */
@@ -24,7 +25,7 @@ const sha = (b) => createHash('sha256').update(b).digest('hex');
 const eq = (a, b) => Buffer.compare(a, b) === 0;
 
 /** @returns {Promise<{ ok: boolean, problems: string[], version?: string }>} */
-export async function verifyReleaseDir({ dir, allowDev = false, now = new Date(), keys, componentKeys }) {
+export async function verifyReleaseDir({ dir, allowDev = false, now = new Date(), keys, componentKeys, installerKeys }) {
   const problems = []; const bad = (m) => problems.push(m);
   const read = (n) => readFileSync(join(dir, n));
   const releaseKeySet = keys ?? await releaseKeys({ allowDev });
@@ -54,7 +55,7 @@ export async function verifyReleaseDir({ dir, allowDev = false, now = new Date()
   if (clientManifest.kind !== 'botwarren-companion-client' || clientManifest.schema !== 1) bad('the client manifest is not a Companion client manifest');
   const version = String(clientManifest.version);
   if (Date.parse(clientManifest.expires) <= now.getTime()) bad('the client manifest has expired');
-  const expectNames = [`client-${version}.tar.gz`, 'client-manifest.json', 'client-manifest.json.sig', 'component-manifest.json', 'component-manifest.json.sig', `companion-${version}.zip`, `relay-context-${version}.tar.gz`].sort();
+  const expectNames = [`client-${version}.tar.gz`, 'client-manifest.json', 'client-manifest.json.sig', 'component-manifest.json', 'component-manifest.json.sig', `companion-${version}.zip`, 'install.ps1', 'install.sh', `relay-context-${version}.tar.gz`].sort();
   if (JSON.stringify(present) !== JSON.stringify(expectNames)) bad(`unexpected release files: ${present.join(', ')} (expected ${expectNames.join(', ')})`);
   if (problems.length) return { ok: false, problems, version };
 
@@ -96,7 +97,15 @@ export async function verifyReleaseDir({ dir, allowDev = false, now = new Date()
     }
   }
 
-  // 4. the relay image inputs
+  // 4. the manual installers: they carry the trust root of an install without a ship agent, so each must embed every pinned production key (never a dev key)
+  const prodKeys = installerKeys ?? await releaseKeys({ allowDev: false });
+  const sh = read('install.sh').toString('utf8'); const ps1 = read('install.ps1').toString('utf8');
+  if (!sh.startsWith('#!/bin/sh\n') || !sh.includes("<<'BOTWARREN_INSTALLER_JS'")) bad('install.sh is not the Companion installer');
+  if (!ps1.includes("$js = @'")) bad('install.ps1 is not the Companion installer');
+  for (const k of prodKeys) for (const [n, t] of [['install.sh', sh], ['install.ps1', ps1]]) if (!t.includes(k.spki)) bad(`${n} does not embed the pinned component key ${k.id}`);
+  for (const [n, t] of [['install.sh', sh], ['install.ps1', ps1]]) if (/PRIVATE KEY/.test(t)) bad(`${n} contains private key material`);
+
+  // 5. the relay image inputs
   const ctxEntries = new Map(readTarGz(read(`relay-context-${version}.tar.gz`)).map((e) => [e.name, e.data]));
   const ctxRaw = ctxEntries.get('CONTEXT.json');
   if (!ctxRaw) bad('the relay context has no CONTEXT.json');

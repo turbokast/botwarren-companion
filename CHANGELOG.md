@@ -6,6 +6,24 @@ A release is only built from a dated entry in this file: the release workflow ta
 
 ## [Unreleased]
 
+## [0.1.1] - 2026-10-15
+
+Makes the first release usable: how to get the command, an install for computers without a ship agent, renewal of the signed manifest, and a relay image fix.
+
+### Added
+
+- **Manual installers for a computer without a ship agent:** `install.sh` (Linux, macOS) and `install.ps1` (Windows), published at `https://downloads.botwarren.com/companion/` and attached to each release. They verify before anything runs: the Ed25519 signature of the component manifest against the component key pinned inside the script (checked first; a development key is refused unless a test allows it for an address on the computer itself), then the bundle's size and SHA-256, then its contents (exactly four named files, no paths or links), and the manifest's expiry, counter (anti-rollback), epoch, blocked list, protocol and Node version; only then they extract and self-test. Per-user locations, no administrator rights, https only; `--service` also runs the daemon in the background (systemd `--user`, launchd, or the Windows Startup folder), `--dry-run` verifies and writes nothing, `--uninstall` removes it all (devices revoked, hooks removed, keys deleted first). The scripts are generated from one program (`apps/companion/install/installer.mjs`); a test fails if they are out of date, if the pinned keys differ from the ship agent's component keys, or if a release does not embed the pinned production key. Tested against signed fixtures with a throw-away key, the same verdicts as the ship agent's verifier, shellcheck, and an end-to-end run of the real script.
+- **`botwarren-companion enroll` at a terminal** shows this computer's public key and accepts the enrolment pasted from the account page ("Enrol a computer"), for an install without a ship agent. With JSON on stdin it behaves as before.
+- **A scheduled re-sign** (`.github/workflows/resign.yml`, monthly, behind the same `release` environment approvals): renews the current component manifest, which is valid for 90 days, when fewer than 45 days remain. It re-verifies the published manifest and bundle against the pinned key and hash, changes only the manifest counter and dates, signs with the same Cloud KMS key through GitHub OIDC, checks the result and uploads the signature then the manifest. Documented in [docs/RELEASING.md](docs/RELEASING.md).
+
+### Fixed
+
+- The relay image: `/srv` is made world-readable before the process drops to the unprivileged `relay` user, so a build context extracted with restrictive directory modes no longer crashes the relay at start (`ERR_MODULE_NOT_FOUND` caused by `EACCES`); the relay deploy helper relaxes the extractor's `0700` directories as well. This made the first production deploy of 0.1.0 fail.
+
+### Changed
+
+- `docs`, README: how the `botwarren-companion` command is reached (the ship agent 0.7.1 adds it next to `botwarren` and passes `botwarren companion <command>` through), and the two install paths.
+
 ## [0.1.0] - 2026-10-15
 
 First release: opt-in, end-to-end encrypted remote approvals for coding agents. Pre-release; no independent security review yet.

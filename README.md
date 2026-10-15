@@ -44,7 +44,31 @@ The protocol, the threat model (T1 to T12) and the accepted risks are in [docs/P
 
 ## Install and pair
 
-The Companion is not installed by default and there is no stand-alone installer. The Botwarren ship agent installs it only when **your account has been offered it and you agreed** on your account page at botwarren.com, and only from a manifest signed with the Botwarren component signing key (a separate key from the one that signs the agent's own updates, pinned separately in the agent, which never accepts one key for the other's job): the agent verifies the signature, then the file hash, then runs a self-test, before anything else happens (`botwarren companion status | remove | block`). Every release here publishes the signed bundle (`companion-<version>.zip`), the signed manifest and their hashes.
+The Companion is not installed by default. There are two ways to get it onto a computer, and both install **only** a bundle that passed the same checks: the Ed25519 signature of the component manifest (checked first) against the Botwarren component signing key, then the bundle's size and SHA-256, then its contents, and only then a self-test. The component key is a separate key from the one that signs the ship agent's own updates; it is pinned separately, and neither key is ever accepted for the other's job. If any check fails, nothing is installed and nothing from the download runs. Every release here publishes the signed bundle (`companion-<version>.zip`), the signed manifest, the installers and their hashes.
+
+* **With the Botwarren ship agent** (0.7.1 or later for the commands below): the agent installs it when **your account has been offered it and you agreed** on your account page at botwarren.com (`botwarren companion status | remove | block`). The agent adds a `botwarren-companion` command next to `botwarren`, and every command below also works as `botwarren companion <command>`.
+* **Without a ship agent** (see below): run the installer yourself.
+
+### Install without a ship agent
+
+For a computer that does not run the ship agent (for example a development machine that runs from source, or one where you prefer not to run an agent). It needs Node.js 22.13 or newer, no administrator rights, and an account that an admin enabled for remote approvals and that agreed on the account page (without that the website will not enrol the computer, so an install on its own does nothing).
+
+```
+# Linux and macOS (add `-s -- --service` to also run it in the background):
+curl -fsSL https://downloads.botwarren.com/companion/install.sh | sh
+# Windows PowerShell: download, read, run
+Invoke-WebRequest https://downloads.botwarren.com/companion/install.ps1 -OutFile install.ps1
+.\install.ps1 --service
+```
+
+The script is [`apps/companion/install/install.sh`](apps/companion/install/install.sh) (and `install.ps1`), generated from one reviewed program ([`installer.mjs`](apps/companion/install/installer.mjs)) and attached, with a build attestation, to every GitHub release; read it before you run it if you like (`sh install.sh --help`, `--dry-run` verifies everything and writes nothing). The key it trusts is written inside it; it downloads only `manifest.json`, `manifest.json.sig` and the zip from `downloads.botwarren.com/companion/` (https only), refuses a manifest that is expired, older than one it accepted before, for another component or blocked, extracts exactly four named files into `~/.local/share/botwarren-companion` (Windows: `%LOCALAPPDATA%\Botwarren\companion`), and adds the `botwarren-companion` command to `~/.local/bin` (Windows: `%LOCALAPPDATA%\Botwarren\bin`, added to your user PATH). Re-run it to update; `--uninstall` revokes your devices, removes the hooks, deletes this computer's keys and removes everything it installed.
+
+Then, once:
+
+```
+botwarren-companion enroll      # prints this computer's PUBLIC key; paste it on botwarren.com/account ("Remote approvals" > "Enrol a computer"), paste the enrolment text back here
+botwarren-companion daemon      # leave it running (or install with --service so a service manager does)
+```
 
 1. Agree on your account page (an admin must have offered it to the account first).
 2. On your computer, run the companion's `pair` command (below). A code and a QR appear **there**, never on the website.
@@ -59,7 +83,7 @@ botwarren-companion devices revoke <name>
 botwarren-companion uninstall --purge         # revokes devices, stops the daemon, removes hooks, deletes keys
 ```
 
-`botwarren-companion` stands for `node companion.mjs` from the installed bundle (the same file the zip contains), or `pnpm --filter @botwarren/companion cli` in a checkout.
+`botwarren-companion` is the command the installer (or the ship agent) puts next to your other commands; it stands for `node companion.mjs` from the installed bundle (the same file the zip contains), or `pnpm --filter @botwarren/companion cli` in a checkout. With the ship agent, `botwarren companion pair` (and `devices`, `status`, `pause`, `resume`, `confirm`, `log`, `claude ...`) is the same thing; remove an agent-installed companion with `botwarren companion remove`, not `uninstall`.
 
 ### Claude Code requirements
 
