@@ -126,7 +126,7 @@ describe('OpenCode control: free-text answer to a question (form)', () => {
 
   it('a question in a folder whose name has ~ ! \' ( ) * is still seen (Windows short names like RUNNER~1, "site (copy)")', async () => {
     const r = await rig();
-    const odd = join(r.root, "RUNNER~1 (copy) it's*!");
+    const odd = join(r.root, "RUNNER~1 (copy) it's!"); // no * : Windows forbids it in a folder name
     mkdirSync(odd);
     r.oc.sessions.push({ id: SID, dir: odd });
     r.oc.forms.push({ id: 'frm_aaaa11112222', sessionID: SID, title: 'Which branch?', dir: odd, fields: [{ key: 'branch', type: 'string' }] as never });
