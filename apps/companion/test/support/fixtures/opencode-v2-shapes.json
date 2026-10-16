@@ -1,0 +1,1158 @@
+{
+ "capturedWith": "opencode v2.0.21 `opencode serve` as a separate test user, temp HOME, empty environment, loopback, random password, no provider login (the free built-in model answered); paths, pid, port, project ids and reasoning text sanitized. Recorded by a throw-away probe script (not part of this repository).",
+ "entries": [
+  {
+   "name": "info",
+   "method": "GET",
+   "path": "/api/info",
+   "req": null,
+   "status": 200,
+   "res": {
+    "version": "2.0.21",
+    "pid": 1,
+    "urls": [
+     "http://127.0.0.1:4096"
+    ],
+    "paths": {
+     "tmp": "/tmp/opencode"
+    }
+   }
+  },
+  {
+   "name": "agents",
+   "method": "GET",
+   "path": "/api/agent?location%5Bdirectory%5D=%2Fwork%2Fdemo%2Frepo",
+   "req": null,
+   "status": 200,
+   "res": {
+    "location": {
+     "directory": "/work/demo/repo"
+    },
+    "data": []
+   }
+  },
+  {
+   "name": "session.create (default mode: ask rules)",
+   "method": "POST",
+   "path": "/api/session",
+   "req": {
+    "location": {
+     "directory": "/work/demo/repo"
+    },
+    "permissions": [
+     {
+      "action": "*",
+      "resource": "*",
+      "effect": "ask"
+     }
+    ]
+   },
+   "status": 200,
+   "res": {
+    "data": {
+     "id": "ses_ebbce2b1dffe1S0z5sMVLZs5VF",
+     "projectID": "proj0000",
+     "cost": 0,
+     "tokens": {
+      "input": 0,
+      "output": 0,
+      "reasoning": 0,
+      "cache": {
+       "read": 0,
+       "write": 0
+      }
+     },
+     "time": {
+      "created": 1792145486271,
+      "updated": 1792145486271
+     },
+     "permissions": [
+      {
+       "action": "*",
+       "resource": "*",
+       "effect": "ask"
+      }
+     ],
+     "location": {
+      "directory": "/work/demo/repo"
+     }
+    }
+   }
+  },
+  {
+   "name": "session.create (plan agent)",
+   "method": "POST",
+   "path": "/api/session",
+   "req": {
+    "location": {
+     "directory": "/work/demo/repo"
+    },
+    "agent": "plan",
+    "permissions": [
+     {
+      "action": "*",
+      "resource": "*",
+      "effect": "ask"
+     }
+    ]
+   },
+   "status": 200,
+   "res": {
+    "data": {
+     "id": "ses_ebbce0de9ffeQ7Sm2FGnvffZX7",
+     "projectID": "proj0000",
+     "agent": "plan",
+     "cost": 0,
+     "tokens": {
+      "input": 0,
+      "output": 0,
+      "reasoning": 0,
+      "cache": {
+       "read": 0,
+       "write": 0
+      }
+     },
+     "time": {
+      "created": 1792145486551,
+      "updated": 1792145486551
+     },
+     "permissions": [
+      {
+       "action": "*",
+       "resource": "*",
+       "effect": "ask"
+      }
+     ],
+     "location": {
+      "directory": "/work/demo/repo"
+     }
+    }
+   }
+  },
+  {
+   "name": "session.create (unknown agent)",
+   "method": "POST",
+   "path": "/api/session",
+   "req": {
+    "location": {
+     "directory": "/work/demo/repo"
+    },
+    "agent": "nope-agent"
+   },
+   "status": 200,
+   "res": {
+    "data": {
+     "id": "ses_ebbce0d12ffeBw1wgqBgjMbiLf",
+     "projectID": "proj0000",
+     "agent": "nope-agent",
+     "cost": 0,
+     "tokens": {
+      "input": 0,
+      "output": 0,
+      "reasoning": 0,
+      "cache": {
+       "read": 0,
+       "write": 0
+      }
+     },
+     "time": {
+      "created": 1792145486718,
+      "updated": 1792145486718
+     },
+     "location": {
+      "directory": "/work/demo/repo"
+     }
+    }
+   }
+  },
+  {
+   "name": "session.create (missing directory)",
+   "method": "POST",
+   "path": "/api/session",
+   "req": {
+    "location": {
+     "directory": "/work/demo/does-not-exist"
+    }
+   },
+   "status": 200,
+   "res": {
+    "data": {
+     "id": "ses_ebbce09b5ffeUMSRui3aR4LKB5",
+     "projectID": "proj0000",
+     "cost": 0,
+     "tokens": {
+      "input": 0,
+      "output": 0,
+      "reasoning": 0,
+      "cache": {
+       "read": 0,
+       "write": 0
+      }
+     },
+     "time": {
+      "created": 1792145487755,
+      "updated": 1792145487755
+     },
+     "location": {
+      "directory": "/work/demo/does-not-exist"
+     }
+    }
+   }
+  },
+  {
+   "name": "session.create (relative directory)",
+   "method": "POST",
+   "path": "/api/session",
+   "req": {
+    "location": {
+     "directory": "repo"
+    }
+   },
+   "status": 500,
+   "res": ""
+  },
+  {
+   "name": "session.active (idle)",
+   "method": "GET",
+   "path": "/api/session/active",
+   "req": null,
+   "status": 200,
+   "res": {
+    "data": {}
+   }
+  },
+  {
+   "name": "prompt (queue, idle session)",
+   "method": "POST",
+   "path": "/api/session/ses_ebbce2b1dffe1S0z5sMVLZs5VF/prompt",
+   "req": {
+    "text": "hello from the lab",
+    "delivery": "queue"
+   },
+   "status": 200,
+   "res": {
+    "data": {
+     "id": "msg_14431f93b00143SR4BrCsTpssZ",
+     "sessionID": "ses_ebbce2b1dffe1S0z5sMVLZs5VF",
+     "time": {
+      "created": 1792145488199
+     },
+     "type": "user",
+     "payload": {
+      "text": "hello from the lab"
+     },
+     "delivery": "queue"
+    }
+   }
+  },
+  {
+   "name": "session.active (just after prompt)",
+   "method": "GET",
+   "path": "/api/session/active",
+   "req": null,
+   "status": 200,
+   "res": {
+    "data": {
+     "ses_ebbce2b1dffe1S0z5sMVLZs5VF": {
+      "type": "running"
+     }
+    }
+   }
+  },
+  {
+   "name": "message.get (the prompt we sent)",
+   "method": "GET",
+   "path": "/api/session/ses_ebbce2b1dffe1S0z5sMVLZs5VF/message/msg_14431f93b00143SR4BrCsTpssZ",
+   "req": null,
+   "status": 200,
+   "res": {
+    "data": {
+     "id": "msg_14431f93b00143SR4BrCsTpssZ",
+     "time": {
+      "created": 1792145488395
+     },
+     "text": "hello from the lab",
+     "type": "user"
+    }
+   }
+  },
+  {
+   "name": "message.list (desc, limit 6)",
+   "method": "GET",
+   "path": "/api/session/ses_ebbce2b1dffe1S0z5sMVLZs5VF/message?order=desc&limit=6",
+   "req": null,
+   "status": 200,
+   "res": {
+    "data": [
+     {
+      "id": "msg_14431fa4a001su3FsbKVq2yUZg",
+      "time": {
+       "created": 1792145488498
+      },
+      "type": "assistant",
+      "agent": "build",
+      "model": {
+       "id": "ll-alpha-free",
+       "providerID": "opencode"
+      },
+      "content": [
+       {
+        "type": "reasoning",
+        "text": "(reasoning text removed)",
+        "state": {
+         "reasoningField": "reasoning_content"
+        },
+        "time": {
+         "created": 1792145489357
+        }
+       },
+       {
+        "type": "text",
+        "text": ""
+       }
+      ]
+     },
+     {
+      "id": "msg_14431f93b00143SR4BrCsTpssZ",
+      "time": {
+       "created": 1792145488395
+      },
+      "text": "hello from the lab",
+      "type": "user"
+     }
+    ],
+    "cursor": {
+     "previous": "CURSOR",
+     "next": "CURSOR"
+    }
+   }
+  },
+  {
+   "name": "session.active (later)",
+   "method": "GET",
+   "path": "/api/session/active",
+   "req": null,
+   "status": 200,
+   "res": {
+    "data": {
+     "ses_ebbce2b1dffe1S0z5sMVLZs5VF": {
+      "type": "running"
+     }
+    }
+   }
+  },
+  {
+   "name": "prompt (no delivery field)",
+   "method": "POST",
+   "path": "/api/session/ses_ebbce2b1dffe1S0z5sMVLZs5VF/prompt",
+   "req": {
+    "text": "second"
+   },
+   "status": 200,
+   "res": {
+    "data": {
+     "id": "msg_1443204d1001KiLS93z1JqtIAH",
+     "sessionID": "ses_ebbce2b1dffe1S0z5sMVLZs5VF",
+     "time": {
+      "created": 1792145491181
+     },
+     "type": "user",
+     "payload": {
+      "text": "second"
+     },
+     "delivery": "steer"
+    }
+   }
+  },
+  {
+   "name": "prompt (steer)",
+   "method": "POST",
+   "path": "/api/session/ses_ebbce2b1dffe1S0z5sMVLZs5VF/prompt",
+   "req": {
+    "text": "third",
+    "delivery": "steer"
+   },
+   "status": 200,
+   "res": {
+    "data": {
+     "id": "msg_14432063f001PBIPiJFUqHul1b",
+     "sessionID": "ses_ebbce2b1dffe1S0z5sMVLZs5VF",
+     "time": {
+      "created": 1792145491522
+     },
+     "type": "user",
+     "payload": {
+      "text": "third"
+     },
+     "delivery": "steer"
+    }
+   }
+  },
+  {
+   "name": "prompt (empty text)",
+   "method": "POST",
+   "path": "/api/session/ses_ebbce2b1dffe1S0z5sMVLZs5VF/prompt",
+   "req": {
+    "text": ""
+   },
+   "status": 200,
+   "res": {
+    "data": {
+     "id": "msg_144320666001SykJJKljZdP6by",
+     "sessionID": "ses_ebbce2b1dffe1S0z5sMVLZs5VF",
+     "time": {
+      "created": 1792145491562
+     },
+     "type": "user",
+     "payload": {
+      "text": ""
+     },
+     "delivery": "steer"
+    }
+   }
+  },
+  {
+   "name": "prompt (unknown session)",
+   "method": "POST",
+   "path": "/api/session/ses_doesnotexist0000/prompt",
+   "req": {
+    "text": "x"
+   },
+   "status": 404,
+   "res": {
+    "_tag": "SessionNotFoundError",
+    "sessionID": "ses_doesnotexist0000",
+    "message": "Session not found: ses_doesnotexist0000"
+   }
+  },
+  {
+   "name": "prompt (extra field rejected)",
+   "method": "POST",
+   "path": "/api/session/ses_ebbce2b1dffe1S0z5sMVLZs5VF/prompt",
+   "req": {
+    "text": "x",
+    "bogus": 1
+   },
+   "status": 200,
+   "res": {
+    "data": {
+     "id": "msg_144320731001qNj3fbi0B3bybk",
+     "sessionID": "ses_ebbce2b1dffe1S0z5sMVLZs5VF",
+     "time": {
+      "created": 1792145491764
+     },
+     "type": "user",
+     "payload": {
+      "text": "x"
+     },
+     "delivery": "steer"
+    }
+   }
+  },
+  {
+   "name": "message.list (desc, limit 8) after prompts",
+   "method": "GET",
+   "path": "/api/session/ses_ebbce2b1dffe1S0z5sMVLZs5VF/message?order=desc&limit=8",
+   "req": null,
+   "status": 200,
+   "res": {
+    "data": [
+     {
+      "id": "msg_1443204d1001KiLS93z1JqtIAH",
+      "time": {
+       "created": 1792145491405
+      },
+      "text": "second",
+      "type": "user"
+     },
+     {
+      "id": "msg_14431fa4a001su3FsbKVq2yUZg",
+      "time": {
+       "created": 1792145488498,
+       "streamed": 1792145491266,
+       "completed": 1792145491279
+      },
+      "type": "assistant",
+      "agent": "build",
+      "model": {
+       "id": "ll-alpha-free",
+       "providerID": "opencode"
+      },
+      "content": [
+       {
+        "type": "reasoning",
+        "text": "(reasoning text removed)",
+        "state": {
+         "reasoningField": "reasoning_content"
+        },
+        "time": {
+         "created": 1792145489357,
+         "completed": 1792145491227
+        }
+       },
+       {
+        "type": "text",
+        "text": "Hello! Welcome back. What can I help you with today?"
+       }
+      ],
+      "finish": "stop",
+      "rawFinish": "stop",
+      "cost": 0,
+      "tokens": {
+       "input": 5468,
+       "output": 61,
+       "reasoning": 0,
+       "cache": {
+        "read": 512,
+        "write": 0
+       }
+      }
+     },
+     {
+      "id": "msg_14431f93b00143SR4BrCsTpssZ",
+      "time": {
+       "created": 1792145488395
+      },
+      "text": "hello from the lab",
+      "type": "user"
+     }
+    ],
+    "cursor": {
+     "previous": "CURSOR",
+     "next": "CURSOR"
+    }
+   }
+  },
+  {
+   "name": "session.active (busy?)",
+   "method": "GET",
+   "path": "/api/session/active",
+   "req": null,
+   "status": 200,
+   "res": {
+    "data": {
+     "ses_ebbce2b1dffe1S0z5sMVLZs5VF": {
+      "type": "running"
+     }
+    }
+   }
+  },
+  {
+   "name": "interrupt (session)",
+   "method": "POST",
+   "path": "/api/session/ses_ebbce2b1dffe1S0z5sMVLZs5VF/interrupt",
+   "req": null,
+   "status": 200,
+   "res": {
+    "interrupted": true
+   }
+  },
+  {
+   "name": "session.active (after interrupt)",
+   "method": "GET",
+   "path": "/api/session/active",
+   "req": null,
+   "status": 200,
+   "res": {
+    "data": {}
+   }
+  },
+  {
+   "name": "interrupt (again, idle)",
+   "method": "POST",
+   "path": "/api/session/ses_ebbce2b1dffe1S0z5sMVLZs5VF/interrupt",
+   "req": null,
+   "status": 200,
+   "res": {
+    "interrupted": false
+   }
+  },
+  {
+   "name": "interrupt (unknown session)",
+   "method": "POST",
+   "path": "/api/session/ses_doesnotexist0000/interrupt",
+   "req": null,
+   "status": 404,
+   "res": {
+    "_tag": "SessionNotFoundError",
+    "sessionID": "ses_doesnotexist0000",
+    "message": "Session not found: ses_doesnotexist0000"
+   }
+  },
+  {
+   "name": "message.list asc limit 3",
+   "method": "GET",
+   "path": "/api/session/ses_ebbce2b1dffe1S0z5sMVLZs5VF/message?order=asc&limit=3",
+   "req": null,
+   "status": 200,
+   "res": {
+    "data": [
+     {
+      "id": "msg_14431f93b00143SR4BrCsTpssZ",
+      "time": {
+       "created": 1792145488395
+      },
+      "text": "hello from the lab",
+      "type": "user"
+     },
+     {
+      "id": "msg_14431fa4a001su3FsbKVq2yUZg",
+      "time": {
+       "created": 1792145488498,
+       "streamed": 1792145491266,
+       "completed": 1792145491279
+      },
+      "type": "assistant",
+      "agent": "build",
+      "model": {
+       "id": "ll-alpha-free",
+       "providerID": "opencode"
+      },
+      "content": [
+       {
+        "type": "reasoning",
+        "text": "(reasoning text removed)",
+        "state": {
+         "reasoningField": "reasoning_content"
+        },
+        "time": {
+         "created": 1792145489357,
+         "completed": 1792145491227
+        }
+       },
+       {
+        "type": "text",
+        "text": "Hello! Welcome back. What can I help you with today?"
+       }
+      ],
+      "finish": "stop",
+      "rawFinish": "stop",
+      "cost": 0,
+      "tokens": {
+       "input": 5468,
+       "output": 61,
+       "reasoning": 0,
+       "cache": {
+        "read": 512,
+        "write": 0
+       }
+      }
+     },
+     {
+      "id": "msg_1443204d1001KiLS93z1JqtIAH",
+      "time": {
+       "created": 1792145491405
+      },
+      "text": "second",
+      "type": "user"
+     }
+    ],
+    "cursor": {
+     "previous": "CURSOR",
+     "next": "CURSOR"
+    }
+   }
+  },
+  {
+   "name": "form.create (single free-text string field)",
+   "method": "POST",
+   "path": "/api/session/ses_ebbce2b1dffe1S0z5sMVLZs5VF/form",
+   "req": {
+    "title": "Which branch should I use?",
+    "fields": [
+     {
+      "key": "branch",
+      "type": "string",
+      "title": "Branch",
+      "required": true
+     }
+    ]
+   },
+   "status": 200,
+   "res": {
+    "data": {
+     "id": "frm_1443213a5001i8PFPluy01FXQf",
+     "sessionID": "ses_ebbce2b1dffe1S0z5sMVLZs5VF",
+     "title": "Which branch should I use?",
+     "fields": [
+      {
+       "key": "branch",
+       "title": "Branch",
+       "required": true,
+       "type": "string"
+      }
+     ]
+    }
+   }
+  },
+  {
+   "name": "form.list (per folder)",
+   "method": "GET",
+   "path": "/api/form?location%5Bdirectory%5D=%2Fwork%2Fdemo%2Frepo",
+   "req": null,
+   "status": 200,
+   "res": {
+    "location": {
+     "directory": "/work/demo/repo"
+    },
+    "data": [
+     {
+      "id": "frm_1443213a5001i8PFPluy01FXQf",
+      "sessionID": "ses_ebbce2b1dffe1S0z5sMVLZs5VF",
+      "title": "Which branch should I use?",
+      "fields": [
+       {
+        "key": "branch",
+        "title": "Branch",
+        "required": true,
+        "type": "string"
+       }
+      ]
+     }
+    ]
+   }
+  },
+  {
+   "name": "form.list (per session)",
+   "method": "GET",
+   "path": "/api/session/ses_ebbce2b1dffe1S0z5sMVLZs5VF/form",
+   "req": null,
+   "status": 200,
+   "res": {
+    "data": [
+     {
+      "id": "frm_1443213a5001i8PFPluy01FXQf",
+      "sessionID": "ses_ebbce2b1dffe1S0z5sMVLZs5VF",
+      "title": "Which branch should I use?",
+      "fields": [
+       {
+        "key": "branch",
+        "title": "Branch",
+        "required": true,
+        "type": "string"
+       }
+      ]
+     }
+    ]
+   }
+  },
+  {
+   "name": "form.get (pending)",
+   "method": "GET",
+   "path": "/api/session/ses_ebbce2b1dffe1S0z5sMVLZs5VF/form/frm_1443213a5001i8PFPluy01FXQf",
+   "req": null,
+   "status": 200,
+   "res": {
+    "data": {
+     "id": "frm_1443213a5001i8PFPluy01FXQf",
+     "sessionID": "ses_ebbce2b1dffe1S0z5sMVLZs5VF",
+     "title": "Which branch should I use?",
+     "fields": [
+      {
+       "key": "branch",
+       "title": "Branch",
+       "required": true,
+       "type": "string"
+      }
+     ],
+     "state": {
+      "status": "pending"
+     }
+    }
+   }
+  },
+  {
+   "name": "form.reply (answer by field key)",
+   "method": "POST",
+   "path": "/api/session/ses_ebbce2b1dffe1S0z5sMVLZs5VF/form/frm_1443213a5001i8PFPluy01FXQf/reply",
+   "req": {
+    "answer": {
+     "branch": "main"
+    }
+   },
+   "status": 204,
+   "res": ""
+  },
+  {
+   "name": "form.get (answered)",
+   "method": "GET",
+   "path": "/api/session/ses_ebbce2b1dffe1S0z5sMVLZs5VF/form/frm_1443213a5001i8PFPluy01FXQf",
+   "req": null,
+   "status": 200,
+   "res": {
+    "data": {
+     "id": "frm_1443213a5001i8PFPluy01FXQf",
+     "sessionID": "ses_ebbce2b1dffe1S0z5sMVLZs5VF",
+     "title": "Which branch should I use?",
+     "fields": [
+      {
+       "key": "branch",
+       "title": "Branch",
+       "required": true,
+       "type": "string"
+      }
+     ],
+     "state": {
+      "status": "answered",
+      "answer": {
+       "branch": "main"
+      }
+     }
+    }
+   }
+  },
+  {
+   "name": "form.reply (again: settled)",
+   "method": "POST",
+   "path": "/api/session/ses_ebbce2b1dffe1S0z5sMVLZs5VF/form/frm_1443213a5001i8PFPluy01FXQf/reply",
+   "req": {
+    "answer": {
+     "branch": "main"
+    }
+   },
+   "status": 409,
+   "res": {
+    "_tag": "FormAlreadySettledError",
+    "id": "frm_1443213a5001i8PFPluy01FXQf",
+    "message": "Form already settled: frm_1443213a5001i8PFPluy01FXQf"
+   }
+  },
+  {
+   "name": "form.reply (unknown form)",
+   "method": "POST",
+   "path": "/api/session/ses_ebbce2b1dffe1S0z5sMVLZs5VF/form/frm_doesnotexist0000/reply",
+   "req": {
+    "answer": {
+     "branch": "x"
+    }
+   },
+   "status": 404,
+   "res": {
+    "_tag": "FormNotFoundError",
+    "id": "frm_doesnotexist0000",
+    "message": "Form not found: frm_doesnotexist0000"
+   }
+  },
+  {
+   "name": "form.create (select, custom=false)",
+   "method": "POST",
+   "path": "/api/session/ses_ebbce2b1dffe1S0z5sMVLZs5VF/form",
+   "req": {
+    "title": "Pick one",
+    "fields": [
+     {
+      "key": "db",
+      "type": "string",
+      "options": [
+       {
+        "value": "pg",
+        "label": "Postgres"
+       },
+       {
+        "value": "my",
+        "label": "MySQL"
+       }
+      ],
+      "custom": false
+     }
+    ]
+   },
+   "status": 200,
+   "res": {
+    "data": {
+     "id": "frm_14432143d001XFCwt8r770xwHh",
+     "sessionID": "ses_ebbce2b1dffe1S0z5sMVLZs5VF",
+     "title": "Pick one",
+     "fields": [
+      {
+       "key": "db",
+       "type": "string",
+       "options": [
+        {
+         "value": "pg",
+         "label": "Postgres"
+        },
+        {
+         "value": "my",
+         "label": "MySQL"
+        }
+       ],
+       "custom": false
+      }
+     ]
+    }
+   }
+  },
+  {
+   "name": "form.reply (not an option)",
+   "method": "POST",
+   "path": "/api/session/ses_ebbce2b1dffe1S0z5sMVLZs5VF/form/frm_14432143d001XFCwt8r770xwHh/reply",
+   "req": {
+    "answer": {
+     "db": "oracle"
+    }
+   },
+   "status": 400,
+   "res": {
+    "_tag": "FormInvalidAnswerError",
+    "id": "frm_14432143d001XFCwt8r770xwHh",
+    "message": "Invalid option for form field: db"
+   }
+  },
+  {
+   "name": "form.reply (an option)",
+   "method": "POST",
+   "path": "/api/session/ses_ebbce2b1dffe1S0z5sMVLZs5VF/form/frm_14432143d001XFCwt8r770xwHh/reply",
+   "req": {
+    "answer": {
+     "db": "pg"
+    }
+   },
+   "status": 204,
+   "res": ""
+  },
+  {
+   "name": "form.create (two fields)",
+   "method": "POST",
+   "path": "/api/session/ses_ebbce2b1dffe1S0z5sMVLZs5VF/form",
+   "req": {
+    "title": "Two things",
+    "fields": [
+     {
+      "key": "a",
+      "type": "string"
+     },
+     {
+      "key": "b",
+      "type": "boolean"
+     }
+    ]
+   },
+   "status": 200,
+   "res": {
+    "data": {
+     "id": "frm_144321491001q14iHsdBMHA8Qk",
+     "sessionID": "ses_ebbce2b1dffe1S0z5sMVLZs5VF",
+     "title": "Two things",
+     "fields": [
+      {
+       "key": "a",
+       "type": "string"
+      },
+      {
+       "key": "b",
+       "type": "boolean"
+      }
+     ]
+    }
+   }
+  },
+  {
+   "name": "form.list after (only the two-field one pending)",
+   "method": "GET",
+   "path": "/api/session/ses_ebbce2b1dffe1S0z5sMVLZs5VF/form",
+   "req": null,
+   "status": 200,
+   "res": {
+    "data": [
+     {
+      "id": "frm_144321491001q14iHsdBMHA8Qk",
+      "sessionID": "ses_ebbce2b1dffe1S0z5sMVLZs5VF",
+      "title": "Two things",
+      "fields": [
+       {
+        "key": "a",
+        "type": "string"
+       },
+       {
+        "key": "b",
+        "type": "boolean"
+       }
+      ]
+     }
+    ]
+   }
+  },
+  {
+   "name": "form.cancel",
+   "method": "DELETE",
+   "path": "/api/session/ses_ebbce2b1dffe1S0z5sMVLZs5VF/form/frm_144321491001q14iHsdBMHA8Qk",
+   "req": null,
+   "status": 204,
+   "res": ""
+  },
+  {
+   "name": "permission.create",
+   "method": "POST",
+   "path": "/api/session/ses_ebbce2b1dffe1S0z5sMVLZs5VF/permission",
+   "req": {
+    "action": "bash",
+    "resources": [
+     "touch ../lab-1"
+    ],
+    "save": [
+     "touch *"
+    ],
+    "metadata": {
+     "description": "lab"
+    },
+    "source": {
+     "type": "tool",
+     "messageID": "msg_lab",
+     "id": "call_14"
+    }
+   },
+   "status": 200,
+   "res": {
+    "data": {
+     "id": "per_1443214c7001ky6pNRVSyncTcq",
+     "effect": "ask"
+    }
+   }
+  },
+  {
+   "name": "permission.request.list",
+   "method": "GET",
+   "path": "/api/permission/request?location%5Bdirectory%5D=%2Fwork%2Fdemo%2Frepo",
+   "req": null,
+   "status": 200,
+   "res": {
+    "location": {
+     "directory": "/work/demo/repo"
+    },
+    "data": [
+     {
+      "id": "per_1443214c7001ky6pNRVSyncTcq",
+      "sessionID": "ses_ebbce2b1dffe1S0z5sMVLZs5VF",
+      "action": "bash",
+      "resources": [
+       "touch ../lab-1"
+      ],
+      "save": [
+       "touch *"
+      ],
+      "metadata": {
+       "description": "lab"
+      },
+      "source": {
+       "type": "tool",
+       "messageID": "msg_lab",
+       "id": "call_14"
+      }
+     }
+    ]
+   }
+  },
+  {
+   "name": "permission.reply once",
+   "method": "POST",
+   "path": "/api/session/ses_ebbce2b1dffe1S0z5sMVLZs5VF/permission/per_1443214c7001ky6pNRVSyncTcq/reply",
+   "req": {
+    "decision": "once"
+   },
+   "status": 204,
+   "res": ""
+  },
+  {
+   "name": "permission.get (after once)",
+   "method": "GET",
+   "path": "/api/session/ses_ebbce2b1dffe1S0z5sMVLZs5VF/permission/per_1443214c7001ky6pNRVSyncTcq",
+   "req": null,
+   "status": 404,
+   "res": {
+    "_tag": "PermissionNotFoundError",
+    "requestID": "per_1443214c7001ky6pNRVSyncTcq",
+    "message": "Permission request not found: per_1443214c7001ky6pNRVSyncTcq"
+   }
+  },
+  {
+   "name": "permission.create",
+   "method": "POST",
+   "path": "/api/session/ses_ebbce2b1dffe1S0z5sMVLZs5VF/permission",
+   "req": {
+    "action": "bash",
+    "resources": [
+     "rm -rf build"
+    ],
+    "save": [
+     "touch *"
+    ],
+    "metadata": {
+     "description": "lab"
+    },
+    "source": {
+     "type": "tool",
+     "messageID": "msg_lab",
+     "id": "call_12"
+    }
+   },
+   "status": 200,
+   "res": {
+    "data": {
+     "id": "per_14432151e001YzPons8gMBZriu",
+     "effect": "ask"
+    }
+   }
+  },
+  {
+   "name": "permission.reply reject + message",
+   "method": "POST",
+   "path": "/api/session/ses_ebbce2b1dffe1S0z5sMVLZs5VF/permission/per_14432151e001YzPons8gMBZriu/reply",
+   "req": {
+    "decision": "reject",
+    "message": "Denied from \"Lab phone\" via Botwarren Companion"
+   },
+   "status": 204,
+   "res": ""
+  },
+  {
+   "name": "permission.saved.list (no standing rule)",
+   "method": "GET",
+   "path": "/api/permission/saved",
+   "req": null,
+   "status": 200,
+   "res": {
+    "data": []
+   }
+  },
+  {
+   "name": "session.get",
+   "method": "GET",
+   "path": "/api/session/ses_ebbce2b1dffe1S0z5sMVLZs5VF",
+   "req": null,
+   "status": 200,
+   "res": {
+    "data": {
+     "id": "ses_ebbce2b1dffe1S0z5sMVLZs5VF",
+     "projectID": "proj0000",
+     "cost": 0,
+     "tokens": {
+      "input": 5468,
+      "output": 61,
+      "reasoning": 0,
+      "cache": {
+       "read": 512,
+       "write": 0
+      }
+     },
+     "outcome": "interrupted",
+     "time": {
+      "created": 1792145486271,
+      "updated": 1792145491764,
+      "idle": 1792145494193
+     },
+     "permissions": [
+      {
+       "action": "*",
+       "resource": "*",
+       "effect": "ask"
+      }
+     ],
+     "location": {
+      "directory": "/work/demo/repo"
+     }
+    }
+   }
+  }
+ ]
+}

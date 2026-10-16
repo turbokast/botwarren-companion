@@ -1,0 +1,30 @@
+{
+  "tool": "muse",
+  "version": "1.4.9",
+  "captured": "2026-10-15",
+  "source": "observed",
+  "how": "recorded in the lab (a real, logged-in Muse Code 1.4.9 TUI driven in a pty, real model, real hook delivery to our plugin); paths and ids replaced, nothing else changed",
+  "event": "PostToolUse",
+  "input": {
+    "cwd": "/work/lab-repo",
+    "hook_event_name": "PostToolUse",
+    "model": "muse-spark-1.3",
+    "model_provider": "meta",
+    "permission_mode": "default",
+    "session_id": "019a0000-0000-7000-8000-0000000000c1",
+    "tool_input": {
+      "advisory_text": null,
+      "confidence": "high",
+      "decision": "none",
+      "priority": "low",
+      "reason": "User constrained action to exactly one shell command with nothing else; no available skill is relevant and any reminder would violate that constraint.",
+      "skill_id": "bundled:git",
+      "visible_for_steps": 1
+    },
+    "tool_name": "submit_reminder_decision",
+    "tool_response": "reminder decision recorded",
+    "tool_use_id": "call_01a140ac5048727d96167727bc6412b7",
+    "transcript_path": null,
+    "turn_id": "019a0000-0000-7000-8000-000000000002"
+  }
+}

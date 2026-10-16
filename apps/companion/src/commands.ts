@@ -12,12 +12,13 @@ import { homeDir, socketPath } from './paths.ts';
 import { CompanionHost } from './host.ts';
 import { EnrollmentSchema, Store, type AlertsConfig } from './store.ts';
 import { relayAllowed } from './policy.ts';
-import { Ticket, unb64u } from './protocol/index.ts';
-import { HOOK_EVENTS, hasOurHooks, quoteWord, readSettings, settingsPath, simpleDiff, versionedHooks, withHooks, withoutHooks, writeSettings } from './claude/settings.ts';
+import { SCOPES, Ticket, unb64u, type Scope } from './protocol/index.ts';
+import { CONTROL_EVENT, HOOK_EVENTS, hasControlHook, hasOurHooks, quoteWord, readSettings, settingsPath, simpleDiff, versionedHooks, withHooks, withoutHooks, writeSettings } from './claude/settings.ts';
 import { installLauncher, isVersionedPath, launcherHealth, launcherPath } from './claude/launcher.ts';
 import { CHANNEL_NAME } from './claude/channel.ts';
 import { noDaemonMessage, serviceUnit, versionMismatchMessage } from './service.ts';
 import { parseClock } from './alerts.ts';
+import { adaptersCommand, awayCommand, toolCommand, type Kit } from './toolcmd.ts';
 
 import { VERSION } from './version.ts';
 export { VERSION };
@@ -42,6 +43,8 @@ export function qrText(data: string): string {
   return lines.join('\n');
 }
 
+const kit = (): Kit => ({ out, has, flag, confirmed, version: VERSION });
+
 export async function run(argv: string[], ctx: Ctx): Promise<number> {
   const dir = homeDir();
   const [cmd, sub] = [argv[0], argv[1]];
@@ -56,9 +59,14 @@ export async function run(argv: string[], ctx: Ctx): Promise<number> {
     case 'status': return status(dir);
     case 'devices': return devices(dir, argv.slice(1));
     case 'pause': case 'resume': return pause(dir, cmd === 'pause');
+    case 'control': return controlCommandAsync(dir, argv.slice(1));
+    case 'tools': return toolsCommand(dir, argv.slice(1));
     case 'confirm': return confirm(dir, ctx);
     case 'log': { for (const l of new Store(dir).auditTail(Number(sub) || 50)) out(l); return 0; }
     case 'claude': return claude(dir, argv.slice(1), ctx);
+    case 'away': return awayCommand(dir, argv.slice(1), ctx, kit());
+    case 'adapters': return adaptersCommand(dir, argv.slice(1), ctx, kit());
+    case 'codex': case 'muse': return (await toolCommand(cmd, dir, argv.slice(1), ctx, kit())) ?? 2;
     case 'uninstall': return uninstall(dir, argv.slice(1), ctx);
     default: process.stderr.write(`unknown command "${cmd}"\n`); help(); return 2;
   }
@@ -66,7 +74,7 @@ export async function run(argv: string[], ctx: Ctx): Promise<number> {
 
 function help(): number {
   out(`botwarren-companion ${VERSION}
-Opt-in, end-to-end encrypted remote approvals for your coding agents (Apache-2.0).
+Opt-in, end-to-end encrypted remote approvals and control for your coding agents (Apache-2.0).
 
   daemon                 run the companion in the foreground
   init [--json]          create this computer's key (prints the public key)
@@ -75,15 +83,27 @@ Opt-in, end-to-end encrypted remote approvals for your coding agents (Apache-2.0
   alerts [on|off]        phone alerts ("an agent is waiting for you"): status, master switch;
                          alerts idle on|off  also alert when an agent finished a turn;  alerts quiet 22:00-07:00 | off
   status                 relay, devices, sessions
-  devices                list paired devices;  devices revoke <name>
+  devices                list paired devices;  devices revoke <name>;  devices grant <name> observe|answer|control;  devices confirm <name> on|off
+  control [on|readonly|off|status]
+                         remote control from a paired device (free text, start, live tail): off until you turn it on; devices also need scope "control"
+  tools <session> on|off  show tool output in the live tail of one session (off by default; masked)
   pause | resume         stop or resume answering from devices
   confirm                answer "confirm on this computer" requests
   log [n]                the local audit log
-  claude install-hooks [--scope user|project|local] [--yes] [--hold SECONDS]
+  claude install-hooks [--scope user|project|local] [--yes] [--hold SECONDS] [--control | --no-control]
                          (also rewrites hooks written by an older version that point at a per-version path; needs --yes when no terminal is attached)
   claude uninstall-hooks [--scope ...]
   claude register-channel [--yes]   register the MCP channel with Claude Code (runs "claude mcp add" with --yes)
   claude doctor
+  away on [--for 2h] | off | status
+                         "I am away": Codex and Muse (when set to hold) wait up to 45 s for your phone before their own question shows
+  adapters               which agents the companion knows and what it reads;  adapters explain <id>;  adapters enable|disable <id>;
+                         adapters hold <codex|muse|copilot> away|never [seconds];  adapters preview herdr on|off;  adapters verify <codex|muse|copilot> <version>;  adapters opencode port <n> | password-env <NAME>|off
+  codex install-hooks [--yes] | remove-hooks | doctor
+                         Codex: show the change to $CODEX_HOME/hooks.json first (needs --yes without a terminal), back it up, never touch other entries
+  muse install-hooks [--yes] | remove-hooks | doctor
+                         Muse: write the "botwarren-companion" plugin, install it with Muse's own command (you approve it in Muse); answering stays off until
+                         you have tested your version (adapters verify)
   uninstall [--purge] [--yes]   revoke all devices, stop the daemon, remove the hooks`);
   return 0;
 }
@@ -210,6 +230,17 @@ async function status(dir: string): Promise<number> {
 
 async function devices(dir: string, a: string[]): Promise<number> {
   const store = new Store(dir);
+  if (a[1] === 'grant' || a[1] === 'confirm') {
+    const who = a[2]; const val = a[3];
+    const scope = SCOPES.find((x) => x === val);
+    if (!who || (a[1] === 'grant' ? !scope : val !== 'on' && val !== 'off')) { process.stderr.write(a[1] === 'grant' ? 'usage: devices grant <name or id> observe|answer|control\n' : 'usage: devices confirm <name or id> on|off\n'); return 2; }
+    const l = await link(dir);
+    if (l) { const r = await l.request(a[1] === 'grant' ? 'device_scope' : 'device_confirm', a[1] === 'grant' ? { device: who, scope } : { device: who, on: val === 'on' }); l.close(); out(r.ok ? 'done.' : 'no such device.'); return r.ok ? 0 : 1; }
+    const all = store.devices(); const d = all.find((x) => x.id.startsWith(who) || x.name === who);
+    if (!d) { out('no such device.'); return 1; }
+    if (a[1] === 'grant') d.scope = scope as Scope; else if (val === 'on') d.confirmEvery = true; else delete d.confirmEvery;
+    store.saveDevices(all); store.audit(a[1] === 'grant' ? 'device_scope' : 'device_confirm', { device: d.id.slice(0, 8) }); out('done (the daemon is not running: it takes effect when it starts).'); return 0;
+  }
   if (a[1] === 'revoke') {
     const who = a[2];
     if (!who) { process.stderr.write('usage: devices revoke <name or id>\n'); return 2; }
@@ -219,8 +250,48 @@ async function devices(dir: string, a: string[]): Promise<number> {
     if (left.length === store.devices().length) { out('no such device.'); return 1; }
     store.saveDevices(left); out('removed from this computer. The relay learns about it when the daemon next runs; start it to finish the revocation.'); return 0;
   }
-  for (const d of store.devices()) out(`${d.id.slice(0, 8)}  ${d.name}  paired ${new Date(d.pairedAt).toISOString()}  seen ${d.lastSeen ? new Date(d.lastSeen).toISOString() : 'never'}`);
+  for (const d of store.devices()) out(`${d.id.slice(0, 8)}  ${d.name}  scope ${d.scope ?? 'answer'}${d.cred ? '  step-up: fingerprint/face' : '  step-up: confirm here'}${d.confirmEvery ? '  confirms every command here' : ''}  paired ${new Date(d.pairedAt).toISOString()}  seen ${d.lastSeen ? new Date(d.lastSeen).toISOString() : 'never'}`);
   return 0;
+}
+
+async function controlCommandAsync(dir: string, a: string[]): Promise<number> {
+  const code = controlCommand(dir, a);
+  if (code === 0 && (a[0] === 'on' || a[0] === 'off' || a[0] === 'readonly')) { const l = await link(dir); if (l) { await l.request('config_changed'); l.close(); } } // the daemon tells the devices at once
+  return code;
+}
+
+/** `control on|readonly|off|status`: the master switch for remote control. It lives in config.json, which the daemon re-reads on every command. */
+function controlCommand(dir: string, a: string[]): number {
+  const store = new Store(dir); const c = store.config();
+  const sub = a[0];
+  if (sub === 'on' || sub === 'off' || sub === 'readonly') {
+    c.control.mode = sub; store.saveConfig(c); store.audit('control_mode', { mode: sub });
+    out(sub === 'on' ? 'remote control is ON: devices with scope "control" can send prompts and start sessions (with a fingerprint/face check or your yes here). Turn it off with "control off".'
+      : sub === 'readonly' ? 'remote control is READ-ONLY: devices can watch the live tail and stop an agent; no prompts, no new sessions.'
+        : 'remote control is OFF: no live tail, no prompts, no new sessions. Approving, denying and stopping an agent from a phone still work (pause stops those too).');
+    return 0;
+  }
+  if (sub !== undefined && sub !== 'status') { process.stderr.write('usage: control [on|readonly|off|status]\n'); return 2; }
+  const k = c.control;
+  out(`remote control: ${k.mode.toUpperCase()}   paused: ${c.paused}`);
+  out(`allowed agents:   ${k.harnesses.length ? k.harnesses.join(', ') : 'any that supports it'}`);
+  out(`allowed projects: ${k.projects.length ? k.projects.join(', ') : 'any'}`);
+  out(`sessions that run without approval prompts: ${k.allowBypass ? 'CAN receive prompts (allowBypass)' : 'watch only'}`);
+  out(`unlock window ${k.unlockMinutes} min; limits ${k.promptsPerHour} prompts/h, ${k.startsPerHour} starts/h; full local log ${k.fullLog ? 'ON' : 'off'}`);
+  out(`launch entries:   ${k.launch.length ? k.launch.map((l) => `${l.id} (${l.harness}, ${l.modes.join('/')})`).join(', ') : 'none (a device cannot start sessions)'}`);
+  for (const d of store.devices()) out(`  device ${d.name}: scope ${d.scope ?? 'answer'}, step-up ${d.cred ? 'fingerprint/face' : 'confirm here'}`);
+  return 0;
+}
+
+/** `tools <session id or label> on|off`: tool output in the live tail of that session (needs the daemon running: the tail lives in its memory) */
+async function toolsCommand(dir: string, a: string[]): Promise<number> {
+  const who = a[0]; const val = a[1];
+  if (!who || (val !== 'on' && val !== 'off')) { process.stderr.write('usage: tools <session id or project name> on|off\n'); return 2; }
+  const l = await needLink(dir);
+  if (!l) return 1;
+  const r = await l.request('tool_output', { session: who, on: val === 'on' }); l.close();
+  out(r.ok ? (val === 'on' ? 'tool output is now included in the live tail of that session (masked for secrets). Off again with "tools ... off".' : 'tool output is no longer included, and what was kept is removed.') : 'no such session (use its id from "status", or its project name when only one session has it).');
+  return r.ok ? 0 : 1;
 }
 
 function pause(dir: string, on: boolean): number {
@@ -236,7 +307,8 @@ async function confirm(dir: string, ctx: Ctx): Promise<number> {
   l.onEvent((ev) => {
     if (ev.t !== 'confirm') return;
     const r = ev.req as { kind: string; agent: string; label: string; tool?: string; preview: string; device: string };
-    out(); out(r.kind === 'reply' ? 'Remote reply requested' : 'Remote approve requested'); out(`  agent  ${r.agent} · ${r.label}`); if (r.tool) out(`  asks   ${r.tool}`); out(`  text   ${r.preview.slice(0, 300)}`); out(`  from   ${r.device}`);
+    const title: Record<string, string> = { reply: 'Remote reply requested', approve: 'Remote approve requested', prompt: 'Remote PROMPT requested (free text for the agent)', answer: 'Remote free-text ANSWER requested', start: 'Remote START of a new session requested', stepup_add: 'A device asks to add a fingerprint or face lock for remote control' };
+    out(); out(title[r.kind] ?? 'Remote request'); if (r.kind !== 'stepup_add') { out(`  agent  ${r.agent} · ${r.label}`); if (r.tool) out(`  asks   ${r.tool}`); out(`  text   ${r.preview.slice(0, r.kind === 'prompt' || r.kind === 'answer' || r.kind === 'start' ? 1000 : 300)}`); } out(`  from   ${r.device}`);
     void ctx.ask('[y] allow   [n] deny : ').then((a) => l.request('confirm_decision', { cid: ev.cid, ok: a.trim().toLowerCase().startsWith('y') }));
   });
   await l.request('confirm_attach');
@@ -285,12 +357,21 @@ async function claude(dir: string, a: string[], ctx: Ctx): Promise<number> {
       let cur;
       try { cur = readSettings(path); } catch (e) { process.stderr.write(`cannot read ${path}: ${(e as Error).message}\n`); return 1; }
       const stale = versionedHooks(cur);
-      const next = withHooks(cur, { node: ctx.node, script: launcher, holdSeconds: hold });
+      // remote control hook (PreToolUse): OPT-IN. --control adds it, --no-control removes it, neither keeps whatever is installed
+      if (has(a, '--control') && has(a, '--no-control')) { process.stderr.write('use only one of --control and --no-control\n'); return 2; }
+      const control = has(a, '--control') ? true : has(a, '--no-control') ? false : undefined;
+      const next = withHooks(cur, { node: ctx.node, script: launcher, holdSeconds: hold, ...(control !== undefined ? { control } : {}) });
       const diff = simpleDiff(JSON.stringify(cur, null, 2), JSON.stringify(next, null, 2));
       if (!diff) { out('hooks are already installed.'); return 0; }
       if (stale.length) { out(`${stale.length} hook(s) from an older version point at a per-version path, which breaks on every update:`); out(`  ${stale[0]}`); out(`They will be rewritten to the stable launcher ${launcher}. A backup of ${path} is written first.`); out(); }
       out(`This will change ${path}:`); out(diff); out();
       out('The hooks only report to your own companion on this computer and fail open: if it is not running, Claude Code behaves as before.');
+      if (hasControlHook(next) && !hasControlHook(cur)) {
+        out();
+        out(`The ${CONTROL_EVENT} CONTROL hook (--control) runs before EVERY tool call of every Claude Code session that reads this settings file (a short local round trip).`);
+        out('It lets a paired device that you gave the "control" scope (a) ask a session to stop at its next tool call and (b) answer an AskUserQuestion while a hold is set.');
+        out('It does nothing until you turn remote control on ("botwarren-companion control on"). Remove it with: claude install-hooks --no-control');
+      }
       if (!(await confirmed(a, ctx, 'Install these hooks?', 'install these hooks'))) return 1;
       installLauncher(dir, entry);
       const backup = writeSettings(path, next);
@@ -308,7 +389,7 @@ async function claude(dir: string, a: string[], ctx: Ctx): Promise<number> {
       out(`removed.${backup ? ` backup: ${backup}` : ''}`); return 0;
     }
     case 'register-channel': {
-      out('The channel lets your phone answer permission prompts and send preset replies while the terminal dialog stays live.');
+      out('The channel lets your phone answer permission prompts and send preset replies while the terminal dialog stays live, and (only with remote control on and a device you granted the control scope) send the session a free-text prompt.');
       out('It is a Claude Code research preview. It is registered once (user scope) and Claude Code is then started with the development flag.');
       const win = platform() === 'win32';
       const add = ['mcp', 'add', '--scope', 'user', CHANNEL_NAME, '--', ctx.node, '--disable-warning=ExperimentalWarning', launcher, 'channel'];
@@ -347,6 +428,7 @@ async function claude(dir: string, a: string[], ctx: Ctx): Promise<number> {
       const reg = registeredChannel();
       out(`channel         ${reg ? (isVersionedPath([reg.command, ...reg.args].join(' ')) ? 'registered with a per-version path: run "botwarren-companion claude register-channel --yes"' : 'registered') : 'not registered (claude register-channel)'}`);
       out(`hook events     ${HOOK_EVENTS.join(', ')}`);
+      for (const sc of ['user', 'project'] as const) { const p = settingsPath(sc, process.cwd()); let on = false; try { on = hasControlHook(readSettings(p)); } catch { /* none */ } out(`control hook (${sc}) ${on ? `installed (${CONTROL_EVENT}): a session can be stopped at its next tool call` : 'not installed (opt-in: claude install-hooks --control); remote stop needs it'}`); }
       out();
       out('Live checks to run once on this machine (not run automatically):');
       out('  1. Start Claude Code with the channel flag; ask it to run a command that needs permission. The terminal dialog AND your phone should both show it.');

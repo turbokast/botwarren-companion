@@ -4,7 +4,7 @@
  */
 import {
   KemKeyring, ReplayGuard, SendCounter, b64u, derivePairKeys, generateIdentity, idOf, openMessage, openOffer, openResult, parseCode, sealMessage, sealRequest, shortAuthString,
-  unb64u, verifyDeviceCert, StateData, ResultData, PushAckData, PushTestAck, CAP_LONG, DEVICE_REPLACE_KEYS, type KemEntry, type Signed, type Identity, type ActionData, type Frame, peekHeader,
+  unb64u, verifyDeviceCert, StateData, ResultData, PushAckData, PushTestAck, CAP_LONG, DEVICE_REPLACE_KEYS, PROTO_VERSION, type KemEntry, type Signed, type Identity, type ActionData, type Frame, peekHeader,
 } from '../../src/protocol/index.ts';
 import { RelayConnection, type ConnState } from '../../src/link/connection.ts';
 import { idbDel, idbGet, idbPut } from './idb.ts';
@@ -166,12 +166,12 @@ export class Link {
     this.persistSoon();
     switch (r.msg.kind) {
       case 'state': { const s = StateData.safeParse(r.msg.data); if (s.success) { this.state = s.data; this.stateSeen = true; this.badState = false; this.emit(); } else { this.stateSeen = true; this.badState = true; this.emit(); } return; }
-      case 'result': { const x = ResultData.safeParse(r.msg.data); if (x.success) { this.results.set(x.data.rid, x.data.outcome); if (['applied', 'denied', 'expired', 'stale', 'failed'].includes(x.data.outcome)) this.dropPending(x.data.rid); this.waiters.get(x.data.rid)?.(x.data.outcome); this.waiters.delete(x.data.rid); this.emit(); } return; }
+      case 'result': { const x = ResultData.safeParse(r.msg.data); if (x.success) { this.results.set(x.data.rid, x.data.outcome); if (['applied', 'sent', 'denied', 'expired', 'stale', 'failed'].includes(x.data.outcome)) this.dropPending(x.data.rid); this.waiters.get(x.data.rid)?.(x.data.outcome); this.waiters.delete(x.data.rid); this.emit(); } return; }
       case 'keyupdate': { const d = r.msg.data as { ep?: number; kem?: string }; if (typeof d.ep === 'number' && typeof d.kem === 'string' && d.ep > this.saved.hostEp) { this.saved.hostEp = d.ep; this.saved.hostKem = d.kem; void this.persist(); } return; }
       case 'pushack': { const a = PushAckData.safeParse(r.msg.data); if (a.success) { this.ackSeen = true; this.alerts = a.data; for (const w of this.alertWaiters.splice(0)) w(a.data); this.emit(); } return; }
       case 'pushtestack': { const a = PushTestAck.safeParse(r.msg.data); if (a.success) this.testWaiters.get(a.data.n)?.(a.data); return; }
       case 'revoked': { this.revoked = true; await this.forgetLocal(); this.emit(); return; }
-      default: return;
+      default: for (const fn of this.kindListeners.get(r.msg.kind) ?? []) fn(r.msg.data); return;
     }
   }
 
@@ -186,15 +186,32 @@ export class Link {
   /** when this connection became ready (ms since 1970) */
   connectedAt = 0;
 
-  private async send(kind: string, data: unknown): Promise<boolean> {
+  /**
+   * Protocol 3 (remote control) rides the same sealed channel: the control transport sends commands with this and hears the computer's answers through
+   * `onKind` (cresult, tail, hist, su_*). Nothing here interprets them.
+   */
+  sendKind(kind: string, data: unknown, replace?: string): Promise<boolean> { return this.send(kind, data, replace); }
+  private kindListeners = new Map<string, Set<(data: unknown) => void>>();
+  /** hears every message of `kind` from the computer; returns the function that stops listening */
+  onKind(kind: string, fn: (data: unknown) => void): () => void {
+    let set = this.kindListeners.get(kind);
+    if (!set) { set = new Set(); this.kindListeners.set(kind, set); }
+    set.add(fn);
+    return () => { set.delete(fn); };
+  }
+  /** resolves with the next message of `kind`; rejects after `ms` */
+  nextKind(kind: string, ms: number): Promise<unknown> {
+    return new Promise((ok, bad) => { const t = setTimeout(() => { off(); bad(new Error(`no ${kind} from the computer within ${ms} ms`)); }, ms); const off = this.onKind(kind, (d) => { clearTimeout(t); off(); ok(d); }); });
+  }
+  private async send(kind: string, data: unknown, replaceKey?: string): Promise<boolean> {
     if (!this.connection) return false;
-    const replace = (DEVICE_REPLACE_KEYS as Record<string, string>)[kind];
+    const replace = replaceKey ?? (DEVICE_REPLACE_KEYS as Record<string, string>)[kind];
     const frame = await sealMessage({ from: this.ident, to: { id: this.hostId, kemPub: unb64u(this.saved.hostKem), epoch: this.saved.hostEp }, seq: this.counter.next() + 1, now: Date.now(), ttlMs: 120_000, kind, data, ...(replace ? { replace } : {}) });
     return this.connection.sendFrame(frame);
   }
 
   /** asks for the state and says what this page can read (long messages); a computer from before 0.1.3 ignores the extra field */
-  private async sendSync(): Promise<void> { this.syncSentAt = Date.now(); await this.send('sync', { caps: [CAP_LONG] }); }
+  private async sendSync(): Promise<void> { this.syncSentAt = Date.now(); await this.send('sync', { proto: PROTO_VERSION, caps: [CAP_LONG] }); }
 
   /** true when the computer sent its state but has not answered the alerts question since this connection began: it is older than 0.1.2 */
   hostLacksAlerts(graceMs = 6000): boolean { return this.conn === 'online' && this.hostOnline !== false && this.stateSeen && !this.ackSeen && Date.now() - this.syncSentAt > graceMs; }

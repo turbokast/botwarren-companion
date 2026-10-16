@@ -1,0 +1,28 @@
+{
+  "tool": "muse",
+  "version": "1.4.9",
+  "captured": "2026-10-15",
+  "source": "observed",
+  "how": "recorded in the lab (a real, logged-in Muse Code 1.4.9 TUI driven in a pty, real model, real hook delivery to our plugin); paths and ids replaced, nothing else changed",
+  "event": "PostToolUseFailure",
+  "input": {
+    "cwd": "/work/lab-repo",
+    "duration_ms": 47,
+    "error": "{\n  \"chunk_id\": \"exec-1-1\",\n  \"exit_code\": 1,\n  \"terminal_status\": \"failed\",\n  \"terminal_reason\": \"process exited with status 1\",\n  \"output\": \"bwrap: loopback: Failed RTM_NEWADDR: Operation not permitted\\n\",\n  \"original_output_bytes\": 61,\n  \"original_output_tokens\": 16,\n  \"truncated\": false\n}",
+    "hook_event_name": "PostToolUseFailure",
+    "is_interrupt": false,
+    "model": "muse-wonder-1.0",
+    "model_provider": "meta",
+    "permission_mode": "default",
+    "session_id": "019a0000-0000-7000-8000-000000000002",
+    "tool_input": {
+      "command": "touch /work/marker-answer.txt",
+      "description": "Create marker file",
+      "workdir": "/work/lab-repo"
+    },
+    "tool_name": "bash",
+    "tool_use_id": "call_01a140ac28dd752d8994542f85c59a8f",
+    "transcript_path": null,
+    "turn_id": "019a0000-0000-7000-8000-0000000000b1"
+  }
+}

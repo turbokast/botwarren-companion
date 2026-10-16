@@ -1,12 +1,12 @@
 cff-version: 1.2.0
 message: If you use this software, please cite it as below.
 title: Botwarren Companion
-abstract: Opt-in, end-to-end encrypted remote approvals for coding agents: the companion, the relay and the signed web client.
+abstract: Opt-in, end-to-end encrypted remote approvals and control for coding agents: the companion, the relay and the signed web client.
 type: software
 authors:
   - name: TurboKast Ltd
-version: 0.1.3
-date-released: 2026-10-15
+version: 0.3.0
+date-released: 2026-10-16
 license: Apache-2.0
 repository-code: https://github.com/turbokast/botwarren-companion
 url: https://botwarren.com

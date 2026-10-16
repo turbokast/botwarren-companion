@@ -1,0 +1,43 @@
+{
+  "tool": "muse",
+  "version": "1.4.9",
+  "captured": "2026-10-15",
+  "source": "observed",
+  "how": "real `muse plugins hook test botwarren-companion:permission-request --fixture ...` in an isolated HOME with an empty environment; the hook printed the stdout shown",
+  "results": [
+    {
+      "stdout": "{\"hookSpecificOutput\":{\"hookEventName\":\"PermissionRequest\",\"decision\":{\"behavior\":\"allow\"}}}",
+      "decision": {
+        "permission_decision": "allow",
+        "should_block": false
+      },
+      "effects": [
+        "permission_allowed"
+      ],
+      "status": "completed"
+    },
+    {
+      "stdout": "{\"hookSpecificOutput\":{\"hookEventName\":\"PermissionRequest\",\"decision\":{\"behavior\":\"deny\",\"message\":\"Spike deny message\"}}}",
+      "decision": {
+        "permission_decision": "deny",
+        "should_block": true,
+        "block_reason": "Spike deny message"
+      },
+      "effects": [
+        "blocked",
+        "permission_denied"
+      ],
+      "status": "blocked"
+    },
+    {
+      "stdout": "{\"hookSpecificOutput\":{\"hookEventName\":\"PermissionRequest\",\"decision\":{\"behavior\":\"allow\",\"updatedPermissions\":[{\"x\":1}]}}}",
+      "decision": {
+        "permission_decision": null,
+        "should_block": false
+      },
+      "effects": [],
+      "status": "failed",
+      "error": "unsupported `hookSpecificOutput.decision.updatedPermissions` in PermissionRequest hook output"
+    }
+  ]
+}

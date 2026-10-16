@@ -4,12 +4,14 @@
  * Newline-delimited JSON. Licence: Apache-2.0.
  */
 import { VERSION } from './version.ts';
+import { SCOPES, type Scope } from './protocol/index.ts';
 import { createConnection, createServer, type Server, type Socket } from 'node:net';
 import { chmodSync, existsSync, renameSync, statSync, unlinkSync } from 'node:fs';
 import { timingSafeEqual, randomBytes } from 'node:crypto';
 import { ClaudeBridge } from './claude/bridge.ts';
 import { CompanionHost, type LocalConfirmRequest } from './host.ts';
 import type { Sess } from './sessions.ts';
+import type { DetectResult } from './adapters/types.ts';
 
 type Msg = Record<string, unknown> & { id?: number | string; op?: string };
 
@@ -173,7 +175,9 @@ export class LocalServer {
         let cancelled = false;
         cancels.push(() => { cancelled = true; });
         const ancestors = Array.isArray(m.ancestors) ? m.ancestors.filter((n): n is number => typeof n === 'number').slice(0, 12) : [];
-        const out = await this.bridge.onHook({
+        // `tool` names the hook family member that sent it; the 0.1.x hook command did not send one and means Claude Code
+        const tool = typeof m.tool === 'string' && /^[a-z0-9-]{2,20}$/.test(m.tool) ? m.tool : 'claude-code';
+        const out = await this.host.hub.hook(tool, {
           event: String(m.event ?? ''), input: (m.input && typeof m.input === 'object' ? m.input : {}) as Record<string, unknown>, ancestors,
           cancelled: () => cancelled, onCancel: (fn) => { cancels.push(fn); },
         });
@@ -228,8 +232,28 @@ export class LocalServer {
         send({ id, ok: true });
         return;
       }
+      case 'away': {
+        // `minutes` > 0 turns "away" on for that long (at most 24 h), 0 turns it off; no `minutes` just reports
+        const mins = typeof m.minutes === 'number' ? Math.max(0, Math.min(1440, Math.floor(m.minutes))) : null;
+        if (mins !== null) this.host.setAway(mins > 0 ? this.host.nowMs() + mins * 60_000 : 0);
+        send({ id, ok: true, away: this.host.isAway(), ...(this.host.isAway() ? { untilMs: this.host.awayUntilMs } : {}) });
+        return;
+      }
+      case 'adapters': {
+        const out = [];
+        for (const a of this.host.hub.list()) {
+          const d: DetectResult = await a.detect().catch(() => ({ present: false }));
+          out.push({ id: a.manifest.id, kind: a.manifest.kind, safety: a.manifest.safety, enabled: this.host.hub.configOf(a.manifest.id).enabled, caps: a.manifest.caps, reads: a.manifest.reads, present: d.present, version: d.version ?? null, note: d.note ?? null, doctor: await a.doctor().catch(() => []) });
+        }
+        send({ id, ok: true, adapters: out });
+        return;
+      }
       case 'confirm_decision': send({ id, ok: this.hub.decide(String(m.cid), m.ok === true) }); return;
       case 'revoke_device': send({ id, ok: await this.host.revokeDevice(String(m.device ?? '')) }); return;
+      case 'device_scope': send({ id, ok: (SCOPES as readonly unknown[]).includes(m.scope) && this.host.setDeviceScope(String(m.device ?? ''), m.scope as Scope) }); return;
+      case 'device_confirm': send({ id, ok: this.host.setDeviceConfirm(String(m.device ?? ''), m.on === true) }); return;
+      case 'config_changed': this.host.configChanged(); send({ id, ok: true }); return;
+      case 'tool_output': send({ id, ok: this.host.setToolOutput(String(m.session ?? ''), m.on === true) }); return;
       case 'revoke_all': await this.host.revokeAll(m.reason === 'account_off' ? 'account_off' : 'removed'); send({ id, ok: true }); return;
       case 'shutdown': send({ id, ok: true }); setTimeout(this.shutdown, 50); return;
       default: send({ id, ok: false, error: 'unknown_op' });

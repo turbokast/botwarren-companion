@@ -4,6 +4,7 @@
  */
 import { z } from 'zod';
 import { bs, hex, utf8 } from './bytes.ts';
+import { HostCtl, SCOPES, SessionCtl } from './control.ts';
 
 export const MAX_RECENT = 3;
 /** what a device that has not said it can read long messages gets (every 0.1.0 to 0.1.2 client): these are the limits of the first versions */
@@ -26,6 +27,21 @@ export const Sid = z.string().regex(/^[a-z0-9]{6,24}$/);
 export const OptionSchema = z.object({ id: z.string().regex(/^[A-Za-z0-9_-]{1,40}$/), label: z.string().min(1).max(80) }).strict();
 export type Option = z.infer<typeof OptionSchema>;
 
+/**
+ * Protocol revision of the inner messages. 1 = companion 0.1.x (Claude Code, Codex and Ninox cards, outcomes up to `failed`). 2 = companion 0.2.0:
+ * more agent kinds, `mode`, `source`, `risk`, `denyWith`, `host.away` and the outcome `sent`. A phone says which it understands in `sync`; the host
+ * sends the new fields only to a phone that said 2 (decision 6: client first, then host), and leaves out what an older phone cannot parse.
+ * 3 = companion 0.3.0: remote control (control.ts, PROTOCOL3.md): scopes, `ctl` on the state, watch/tail/history, prompt, interrupt, start, answer and WebAuthn step-up.
+ */
+export const PROTO_VERSION = 3;
+export const AGENT_KINDS = ['claude-code', 'codex', 'ninox', 'muse', 'opencode', 'agy', 'herdr', 'copilot', 'other'] as const;
+export type AgentKind = (typeof AGENT_KINDS)[number];
+/** the kinds a proto 1 phone can parse */
+export const PROTO1_AGENT_KINDS: readonly AgentKind[] = ['claude-code', 'codex', 'ninox'];
+export const SESSION_MODES = ['normal', 'bypass', 'unknown'] as const;
+export const RISK_TAGS = ['outside_workspace', 'network', 'protected_write', 'escalated', 'destructive', 'screen_sourced', 'unknown_tool'] as const;
+export type RiskTag = (typeof RISK_TAGS)[number];
+
 export const PendingSchema = z.object({
   rid: Rid,
   kind: z.enum(['permission', 'question', 'idle']),
@@ -37,20 +53,31 @@ export const PendingSchema = z.object({
   options: z.array(OptionSchema).max(8).optional(),
   expires: z.number().int(),
   bind: z.string().regex(/^[0-9a-f]{64}$/),
+  /** proto 2. Where the text came from: a structured field of the tool (hook or API), or read off a terminal screen (never answerable, shown with a label) */
+  source: z.enum(['structured', 'screen']).catch('screen').optional(),
+  /** proto 2. Display-only warnings next to the buttons. An open vocabulary on purpose: a phone that does not know a tag shows it as plain text. */
+  risk: z.array(z.string().regex(/^[a-z_]{1,24}$/)).max(8).optional(),
+  /** proto 2. Preset ids a permission request can be denied with ("Deny and say ..."): the host looks the text up in its own list, the phone never supplies it */
+  denyWith: z.array(z.string().regex(/^[A-Za-z0-9_-]{1,40}$/)).max(8).optional(),
   /** what the device may do with this request (the companion decides; e.g. a held hook or a channel is needed to answer) */
-  can: z.object({ approve: z.boolean(), reply: z.boolean() }).strict(),
+  /** `deny` (proto 2): this request can be DENIED from here but not approved (the tool ignores an approval that comes from outside, as Muse does) */
+  can: z.object({ approve: z.boolean(), reply: z.boolean(), deny: z.boolean().optional() }).strict(),
 }).strict();
 export type Pending = z.infer<typeof PendingSchema>;
 
 export const RecentSchema = z.object({ role: z.enum(['assistant', 'user']), text: z.string().max(MAX_RECENT_CHARS_LONG), ts: z.number().int(), cut: z.number().int().min(1).optional() }).strict();
 export const SessionSchema = z.object({
   sid: Sid,
-  agent: z.enum(['claude-code', 'codex', 'ninox']),
+  agent: z.enum(AGENT_KINDS).catch('other'),
+  /** proto 2. `bypass` = the agent runs without approval prompts (nothing to approve); `unknown` = could not tell */
+  mode: z.enum(SESSION_MODES).catch('unknown').optional(),
   label: z.string().max(60),
   status: z.enum(['working', 'waiting', 'idle', 'ended']),
   since: z.number().int(),
   pending: PendingSchema.optional(),
   recent: z.array(RecentSchema).max(MAX_RECENT),
+  /** proto 3. What this device may do with the session and the `bind` its commands must echo (see control.ts) */
+  ctl: SessionCtl.optional(),
 }).strict();
 export type SessionState = z.infer<typeof SessionSchema>;
 
@@ -63,14 +90,19 @@ export const StateData = z.object({
     name: z.string().max(40), paused: z.boolean(),
     confirm: z.object({ approve: z.enum(['off', 'always', 'risky']), reply: z.enum(['off', 'always', 'risky']) }).strict(),
     /** the paired devices (names and last seen), so a phone can show them; removing one is done on the computer */
-    devices: z.array(z.object({ id8: z.string().length(8), name: z.string().max(40), lastSeen: z.number().nullable() }).strict()).max(8),
+    /** proto 2. The person said they are away from the computer: hooks that can hold a request (Codex, Muse) wait for a phone answer for a short while */
+    away: z.boolean().optional(),
+    devices: z.array(z.object({ id8: z.string().length(8), name: z.string().max(40), lastSeen: z.number().nullable(), /** proto 3 */ scope: z.enum(SCOPES).optional() }).strict()).max(8),
+    /** proto 3. This device's own control settings: mode, scope, step-up kind, launch table (see control.ts) */
+    ctl: HostCtl.optional(),
   }).strict(),
   presets: z.array(PresetSchema).max(8),
   sessions: z.array(SessionSchema).max(20),
 }).strict();
 export type StateData = z.infer<typeof StateData>;
 
-export const OUTCOMES = ['applied', 'denied', 'expired', 'stale', 'rejected', 'needs_local', 'paused', 'rate_limited', 'failed'] as const;
+/** `sent` (proto 2): the answer was delivered but the tool's own follow-up was not seen, so it is not claimed as applied */
+export const OUTCOMES = ['applied', 'sent', 'denied', 'expired', 'stale', 'rejected', 'needs_local', 'paused', 'rate_limited', 'failed'] as const;
 export const ResultData = z.object({ rid: Rid, outcome: z.enum(OUTCOMES), note: z.string().max(120).optional() }).strict();
 export type ResultData = z.infer<typeof ResultData>;
 
@@ -87,7 +119,7 @@ export type KeyUpdateData = z.infer<typeof KeyUpdateData>;
 
 export const RevokedData = z.object({ reason: z.enum(['removed', 'account_off']) }).strict();
 /** `caps`: what this device can read beyond the first version (0.1.3 clients send ["long1"]); an older client sends {} and gets the short form */
-export const SyncData = z.object({ caps: z.array(z.string().regex(/^[a-z0-9]{1,12}$/)).max(8).optional() }).strict();
+export const SyncData = z.object({ proto: z.number().int().min(1).max(99).optional(), caps: z.array(z.string().regex(/^[a-z0-9]{1,12}$/)).max(8).optional() }).strict();
 export type SyncData = z.infer<typeof SyncData>;
 
 /**
@@ -148,8 +180,12 @@ export const DEFAULT_PRESET_TEXT: Readonly<Record<string, string>> = {
   summary: 'Please summarise where you are and what you need from me.',
 };
 
-/** SHA-256 over exactly what the user is shown, so an approval can only apply to that request */
-export async function bindOf(p: { rid: string; kind: string; tool?: string | undefined; summary: string; preview: string; options?: readonly Option[] | undefined }): Promise<string> {
-  const s = [p.rid, p.kind, p.tool ?? '', p.summary, p.preview, JSON.stringify(p.options ?? [])].join('\u0000');
-  return hex(new Uint8Array(await globalThis.crypto.subtle.digest('SHA-256', bs(utf8(s)))));
+/**
+ * SHA-256 over exactly what the user is shown, so an approval can only apply to that request. The proto 2 display fields (source, risk, denyWith) are
+ * hashed only when present, so a request that has none (every 0.1.x request) hashes exactly as before.
+ */
+export async function bindOf(p: { rid: string; kind: string; tool?: string | undefined; summary: string; preview: string; options?: readonly Option[] | undefined; source?: string | undefined; risk?: readonly string[] | undefined; denyWith?: readonly string[] | undefined }): Promise<string> {
+  const parts = [p.rid, p.kind, p.tool ?? '', p.summary, p.preview, JSON.stringify(p.options ?? [])];
+  if (p.source || p.risk?.length || p.denyWith?.length) parts.push(p.source ?? '', (p.risk ?? []).join(','), (p.denyWith ?? []).join(','));
+  return hex(new Uint8Array(await globalThis.crypto.subtle.digest('SHA-256', bs(utf8(parts.join('\u0000'))))));
 }

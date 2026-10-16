@@ -23,7 +23,7 @@ You may also use GitHub's **private vulnerability reporting** on this repository
 Especially welcome (high impact):
 
 * anything that lets the relay, the Botwarren website or a network observer **read** a message, or **forge or replay** one (the envelope, HPKE use, signatures, counters, expiry, key rotation, pairing: [docs/PROTOCOL.md](docs/PROTOCOL.md))
-* a way for a remote device, or a malicious web client, to do **more than approve, deny or send a preset reply** to the request that is pending now: free text reaching an agent, an action applied to a request other than the one displayed (the `bind` check), skipping local confirmation, exceeding the rate limits
+* a way for a remote device, or a malicious web client, to do **more than its scope allows**: free text, a start or a tail reaching or leaving an agent when remote control is off or the device lacks the `control` scope; skipping the WebAuthn step-up or the local confirmation; a command accepted after it expired, twice (`cid`), or for a session other than the one displayed (the `bind` check); a prompt into a session that runs without approval prompts; tool output in the live tail while it is off; exceeding the rate limits; anything that lets a command name a path, a command line or a flag
 * a pairing weakness: a code that can be guessed, a pairing that completes without the local confirmation, a relay that can read or tamper with the exchange
 * a bypass of the web client's verification chain: the loader running code that is not in the signed manifest, an unsigned or wrongly signed client being accepted, a relay or origin issue that lets other script run on the client origin (CSP, cookies, headers)
 * a way for a web page, another local user or a local process to reach the companion's local socket or the hook endpoint, or to read its keys (they must not leave the local user's own files)
@@ -34,7 +34,7 @@ Out of scope: vulnerabilities in the tools the Companion observes (report those 
 
 ## Known limits (not vulnerabilities, but you should know)
 
-* **The web client is served by Botwarren.** It is signed and checked by a loader before it runs, but a compromised Botwarren origin or deploy pipeline could serve a client that reads what you are shown and approves pending requests. The companion limits what any client can do ([docs/CLIENT_SECURITY.md](docs/CLIENT_SECURITY.md) explains the choice and the path to stronger clients).
+* **The web client is served by Botwarren.** It is signed and checked by a loader before it runs, but a compromised Botwarren origin or deploy pipeline could serve a client that reads what you are shown (with remote control on, also the live tail) and approves pending requests or, with remote control on and a stepped-up device, sends prompts. A step-up (WebAuthn) does not protect against that, because an authenticator does not show what it signs; only "confirm every command on this computer" for that device does. The companion limits what any client can do ([docs/CLIENT_SECURITY.md](docs/CLIENT_SECURITY.md) explains the choice and the path to stronger clients).
 * **Forward secrecy** is per key rotation (every 7 days when all devices are online), not per message.
 * **Claude Code's Channels feature is a research preview** and may change.
 * **No external review yet.**

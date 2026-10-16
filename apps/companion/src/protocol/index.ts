@@ -6,3 +6,4 @@ export * from './envelope.ts';
 export * from './certs.ts';
 export * from './pairing.ts';
 export * from './messages.ts';
+export * from './control.ts';

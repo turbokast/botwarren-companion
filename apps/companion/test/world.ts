@@ -37,8 +37,8 @@ export interface World {
   daemon: Daemon;
   env: { BOTWARREN_COMPANION_HOME: string };
   /** pair a new simulated phone (the owner says yes at the computer) */
-  pairDevice(name?: string, opts?: { caps?: string[] }): Promise<SimDevice>;
-  hook(event: string, input: Record<string, unknown>): Promise<string | null>;
+  pairDevice(name?: string, opts?: { caps?: string[]; proto?: number }): Promise<SimDevice>;
+  hook(event: string, input: Record<string, unknown>, tool?: string): Promise<string | null>;
   channel(cwd?: string): Promise<Channel>;
   setConfig(patch: Record<string, unknown>): void;
   close(): Promise<void>;
@@ -52,7 +52,7 @@ export interface Channel {
   stop(): void;
 }
 
-export async function startWorld(o: { now?: () => number; clientDir?: string; push?: boolean; stateGapMs?: number; relay?: Partial<import('../../relay/src/relay.ts').RelayConfig> } = {}): Promise<World> {
+export async function startWorld(o: { now?: () => number; clientDir?: string; push?: boolean; stateGapMs?: number; tailGapMs?: number; relay?: Partial<import('../../relay/src/relay.ts').RelayConfig>; resolveWaitMs?: number; versionProbes?: Record<string, () => Promise<string | null>>; herdrTargets?: () => { name: string; path: string }[]; opencodeEnv?: Record<string, string | undefined> } = {}): Promise<World> {
   const dir = mkdtempSync(join(tmpdir(), 'bwc-'));
   const claudeDir = join(dir, 'claude');
   mkdirSync(join(claudeDir, 'projects', 'p'), { recursive: true });
@@ -64,7 +64,7 @@ export async function startWorld(o: { now?: () => number; clientDir?: string; pu
   relay.origin = `http://127.0.0.1:${port}`;
   const base = relay.origin;
   const env = { BOTWARREN_COMPANION_HOME: join(dir, 'home') };
-  const daemon = await startDaemon({ dir: env.BOTWARREN_COMPANION_HOME, env, ...(o.now ? { now: o.now } : {}), ...(o.stateGapMs !== undefined ? { minStateGapMs: o.stateGapMs } : {}) });
+  const daemon = await startDaemon({ dir: env.BOTWARREN_COMPANION_HOME, env, ...(o.now ? { now: o.now } : {}), ...(o.stateGapMs !== undefined ? { minStateGapMs: o.stateGapMs } : {}), ...(o.tailGapMs !== undefined ? { tailGapMs: o.tailGapMs } : {}), ...(o.resolveWaitMs !== undefined ? { resolveWaitMs: o.resolveWaitMs } : {}), ...(o.versionProbes ? { versionProbes: o.versionProbes } : {}), ...(o.herdrTargets ? { herdrTargets: o.herdrTargets } : {}), ...(o.opencodeEnv ? { opencodeEnv: o.opencodeEnv } : {}) });
   const { host, store } = daemon;
   const ticket = await signTicket(server, { v: 1, acct: 'acct-aaaaaaaaaaaaaaaa', host: host.hostId, hostSig: host.hostSigPub, iat: Date.now(), exp: Date.now() + 86_400_000 });
   store.writeJson('enrollment.json', { v: 1, relayUrl: base, ticket, acct: 'acct-aaaaaaaaaaaaaaaa' });
@@ -78,12 +78,13 @@ export async function startWorld(o: { now?: () => number; clientDir?: string; pu
 
   const world: World = {
     dir, claudeDir, relay, push, base, server, daemon, env,
-    async pairDevice(name = 'Sim phone', opts = {} as { caps?: string[] }) {
+    async pairDevice(name = 'Sim phone', opts = {} as { caps?: string[]; proto?: number }) {
       const link = await connectDaemon(env.BOTWARREN_COMPANION_HOME);
       if (!link) throw new Error('no daemon link');
       const confirmed = new Promise<{ sas: string }>((ok) => { link.onEvent((ev) => { if (ev.t === 'pair_confirm') { void link.request('pair_decision', { cid: ev.cid, ok: true }); ok({ sas: String(ev.sas) }); } }); });
       const r = await link.request('pair_start');
       const d = new SimDevice(base, name);
+      if (opts.proto !== undefined) d.proto = opts.proto;
       const { sas, finish } = await d.pair(String(r.code));
       const host = await confirmed;
       if (host.sas !== sas) throw new Error(`SAS mismatch ${host.sas} vs ${sas}`);
@@ -92,10 +93,12 @@ export async function startWorld(o: { now?: () => number; clientDir?: string; pu
       if (opts.caps) d.caps = opts.caps;
       d.connect();
       await d.waitFor(() => d.online);
+      // the host learns the phone's protocol revision from its first `sync`; wait for that so what the test sees next is what the phone will see
+      if (d.proto > 1) await d.waitFor(() => daemon.host.listDevices().find((x) => x.id === d.id.id)?.proto === d.proto);
       devices.push(d);
       return d;
     },
-    hook: (event, input) => runHook(event, JSON.stringify(input), env, 8000),
+    hook: (event, input, tool) => runHook(event, JSON.stringify(input), env, 8000, tool),
     async channel(cwd = '/work/dragon-game') {
       const stdin = new PassThrough(); const stdout = new PassThrough();
       const lines: Record<string, unknown>[] = [];

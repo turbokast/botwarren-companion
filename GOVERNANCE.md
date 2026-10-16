@@ -11,7 +11,7 @@ The project is maintained by **TurboKast Ltd**, which owns the Botwarren service
 Some decisions are not up for a case-by-case vote because they are the reason the project exists. A change that breaks one of them will be declined, however well it is written:
 
 * the relay and the Botwarren website carry **ciphertext only** and never hold a device key;
-* a paired device can **approve, deny or send a preset reply** to the request pending now, and nothing else: no free text, no terminal output, no file transfer;
+* a paired device can, by default, **approve, deny or send a preset reply** to the request pending now and ask a session to stop. Free text, starting a session and the live tail exist only when the owner turned remote control on at the computer **and** granted that device the `control` scope, and free text and starting always need a step-up verified by the computer; tool output stays off until the owner switches it on for a session; there is never a file transfer, and a device can never name a path, a command or a flag;
 * the web client and the component run only if they are covered by a validly signed manifest with matching hashes;
 * no telemetry, no analytics, no third-party origin in the web client.
 

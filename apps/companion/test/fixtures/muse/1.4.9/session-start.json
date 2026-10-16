@@ -1,0 +1,18 @@
+{
+  "tool": "muse",
+  "version": "1.4.9",
+  "captured": "2026-10-15",
+  "source": "observed",
+  "how": "recorded in the lab (a real, logged-in Muse Code 1.4.9 TUI driven in a pty, real model, real hook delivery to our plugin); paths and ids replaced, nothing else changed",
+  "event": "SessionStart",
+  "input": {
+    "cwd": "/work/lab-repo",
+    "hook_event_name": "SessionStart",
+    "model": "muse-wonder-1.0",
+    "model_provider": "meta",
+    "permission_mode": "default",
+    "session_id": "019a0000-0000-7000-8000-000000000002",
+    "source": "startup",
+    "transcript_path": null
+  }
+}

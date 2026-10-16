@@ -7,21 +7,26 @@ import { z } from 'zod';
 import {
   ActionData, KemKeyring, ReplayGuard, SendCounter, StateData as StateSchema, b64u, derivePairKeys, exportIdentityPkcs8, formatCode, generateIdentity, importIdentityPkcs8, idOf, newPairingSecret,
   openMessage, openRequest, peekHeader, sealMessage, sealOffer, sealResult, shortAuthString, signDeviceCert, signRevocation, unb64u, importKemPrivatePkcs8, exportKemPrivatePkcs8,
-  KeyUpdateData, PAIR_TTL_MS, PushAckData, PushRegData, PushTestData, STATE_REPLACE_KEY, SyncData, TEST_REPLACE_KEY, CAP_LONG, maxInnerFor, Ticket,
-  type Frame, type Identity, type KemEntry, type Signed, type PairKeys, type PushTestAck, type StateData,
+  KeyUpdateData, PAIR_TTL_MS, PROTO_VERSION, scopeAtLeast, PushAckData, PushRegData, PushTestData, STATE_REPLACE_KEY, SyncData, TEST_REPLACE_KEY, CAP_LONG, maxInnerFor, Ticket,
+  type Frame, type Identity, type KemEntry, type Signed, type PairKeys, type PushTestAck, type Scope, type StateData, type TailKind,
 } from './protocol/index.ts';
 import { fitLong, toLegacy } from './stateview.ts';
 import { RelayConnection, type ConnectionOptions, type ConnState } from './link/connection.ts';
 import { LEGACY_FRAME_BYTES } from './protocol/index.ts';
 import { ActionLimiter, needsLocalConfirmation, relayAllowed } from './policy.ts';
-import { SessionTable, type Sess } from './sessions.ts';
+import { SessionTable, type PendingInternal, type Sess } from './sessions.ts';
+import { AdapterHub } from './adapters/hub.ts';
+import { ControlGate } from './control.ts';
+import { asPreset } from './adapters/preset.ts';
+import type { Answer } from './adapters/types.ts';
 import { AlertPlanner, type Episode } from './alerts.ts';
 import { sealAlert, sealTestAlert } from './webpush.ts';
 import { secretEnvValues } from './mask.ts';
 import type { Config, DeviceRecord, Store } from './store.ts';
 
 export interface LocalConfirmRequest {
-  kind: 'approve' | 'reply' | 'pair';
+  /** `prompt`, `answer` and `start` (protocol 3): a paired device wants to send free text or start a session (`preview` is the text); `stepup_add`: a device asks to register a fingerprint or face lock */
+  kind: 'approve' | 'reply' | 'pair' | 'prompt' | 'answer' | 'start' | 'stepup_add';
   agent: string;
   label: string;
   tool?: string | undefined;
@@ -42,9 +47,15 @@ export interface HostOptions {
   makeConnection?: (o: ConnectionOptions) => ConnectionLike;
   env?: Record<string, string | undefined>;
   onState?: (s: ConnState) => void;
+  /** how long to wait for the tool's own follow-up after delivering an allow before saying `sent` instead of `applied` (ms; default 10 s) */
+  resolveWaitMs?: number;
   /** at least this long between two state pushes that are not urgent (tests shorten it; default 2000) */
   minStateGapMs?: number;
+  /** tests: the minimum gap between two live-tail pushes of one session (ms; default 1000) */
+  tailGapMs?: number;
 }
+
+type Outcome = 'applied' | 'sent' | 'denied' | 'expired' | 'stale' | 'rejected' | 'needs_local' | 'paused' | 'rate_limited' | 'failed';
 
 export const MAX_DEVICES = 8;
 const STATE_TTL_MS = 5 * 60_000;
@@ -89,11 +100,82 @@ export class CompanionHost {
   private testLog = new Map<string, number[]>();
   private house: ReturnType<typeof setInterval> | null = null;
   private rev = 0;
+  /** the adapters (Claude Code, the hook-family tools, the local-service readers) and the way an authorised answer reaches them */
+  readonly hub: AdapterHub;
+  /** protocol 3: remote control (commands, step-up, live tail) */
+  readonly control: ControlGate;
+  private awayUntil = 0;
+  private lastConfigSig: string | null = null;
+  private stopped = false;
 
   constructor(o: HostOptions) {
     this.opts = o; this.store = o.store; this.now = o.now ?? Date.now;
-    this.sessions = new SessionTable(this.now, () => secretEnvValues(o.env ?? process.env));
+    // the presets a permission request may be denied with are the ones that do not say "yes" (a yes as the reason for a denial would be confusing)
+    this.sessions = new SessionTable(this.now, () => secretEnvValues(o.env ?? process.env), () => this.store.config().presets.filter((p) => !p.affirm).map((p) => p.id));
     this.alerts = new AlertPlanner(() => this.store.config().alerts);
+    this.hub = new AdapterHub(this);
+    this.control = new ControlGate({
+      store: this.store, now: () => this.now(), sessions: this.sessions, hub: this.hub,
+      overall: () => this.actionLimiter(),
+      send: (d, kind, data, ttl, replace) => this.sendTo(d, kind, data, ttl, replace),
+      confirm: (r) => withTimeout(this.opts.confirmer(r), CONFIRM_TIMEOUT_MS),
+      saveDevices: () => this.store.saveDevices(this.devices),
+      devices: () => this.devices,
+      secrets: () => secretEnvValues(o.env ?? process.env),
+      innerBudget: () => Math.min(65_534, maxInnerFor(this.relayMaxFrame)),
+      followupWaitMs: o.resolveWaitMs ?? 10_000,
+      ...(o.tailGapMs !== undefined ? { tailGapMs: o.tailGapMs } : {}),
+      env: o.env ?? process.env,
+    });
+    this.control.onChanged = () => this.schedulePush();
+  }
+
+  private actionLimiter(): ActionLimiter {
+    const cfg = this.store.config();
+    this.limiter ??= new ActionLimiter(cfg.maxActionsPerMinute, cfg.maxActionsPerHour);
+    return this.limiter;
+  }
+
+  // ------------------------------------------------------------------ remote control (protocol 3): used by adapters (through the hub) and the local socket
+  ingestTail(s: Sess, items: { k: TailKind; text: string; ts: number }[]): void { this.control.ingestTail(s, items); }
+  noteFollowup(s: Sess, what: 'prompt' | 'interrupt' | 'answer'): void { this.control.noteFollowup(s, what); }
+  /** the session a person names at this computer: its session id, or its label when only one session has it */
+  findSession(ref: string): Sess | undefined {
+    const all = [...this.sessions.sessions.values()];
+    return all.find((s) => s.sid === ref) ?? (all.filter((s) => s.label === ref).length === 1 ? all.find((s) => s.label === ref) : undefined);
+  }
+  /** the owner changed config.json (remote control mode, allowlists, launch table, pause): tell every device its new state now instead of at the next change */
+  configChanged(): void { this.lastSig.clear(); this.schedulePush(0); }
+  setToolOutput(ref: string, on: boolean): boolean { const s = this.findSession(ref); if (!s) return false; this.control.setToolOutput(s, on); return true; }
+  /** `botwarren-companion devices grant <name> <scope>`: only the person at this computer can raise or lower a device's scope */
+  setDeviceScope(idOrName: string, scope: Scope): boolean {
+    const d = this.devices.find((x) => x.id === idOrName || x.name === idOrName || x.id.startsWith(idOrName));
+    if (!d) return false;
+    d.scope = scope; this.store.saveDevices(this.devices);
+    this.store.audit('device_scope', { device: d.id.slice(0, 8), scope });
+    this.lastSig.delete(d.id); this.schedulePush(0);
+    return true;
+  }
+  /** `devices confirm <name> on|off`: every prompt, free-text answer and start from this device is confirmed at the computer, even with a fingerprint or face lock */
+  setDeviceConfirm(idOrName: string, on: boolean): boolean {
+    const d = this.devices.find((x) => x.id === idOrName || x.name === idOrName || x.id.startsWith(idOrName));
+    if (!d) return false;
+    if (on) d.confirmEvery = true; else delete d.confirmEvery;
+    this.store.saveDevices(this.devices);
+    this.store.audit('device_confirm', { device: d.id.slice(0, 8), on });
+    this.lastSig.delete(d.id); this.schedulePush(0);
+    return true;
+  }
+
+  nowMs(): number { return this.now(); }
+  get awayUntilMs(): number { return this.awayUntil; }
+  /** "I am away from the computer": hooks that can hold a request (Codex, Muse) wait for a phone answer, up to a short limit, then let the tool's own dialog show */
+  isAway(): boolean { return this.awayUntil > this.now(); }
+  setAway(untilMs: number): void {
+    this.awayUntil = untilMs > this.now() ? untilMs : 0;
+    const st = this.store.state(); st.awayUntil = this.awayUntil; this.store.saveState(st);
+    this.store.audit(this.awayUntil ? 'away_on' : 'away_off', this.awayUntil ? { minutes: Math.round((this.awayUntil - this.now()) / 60_000) } : {});
+    this.schedulePush();
   }
 
   // ------------------------------------------------------------------ keys and files
@@ -120,6 +202,7 @@ export class CompanionHost {
     const st = this.store.state();
     this.guard = new ReplayGuard(st.replay);
     this.rev = st.rev;
+    this.awayUntil = st.awayUntil > t ? st.awayUntil : 0;
     for (const r of st.revocations) { try { const j = JSON.parse(new TextDecoder().decode(unb64u(r.j))) as { dev?: string }; if (j.dev) this.revoked.add(j.dev); } catch { /* skip */ } }
     for (const d of this.devices) this.counters.set(d.id, this.counterFor(d.id, st.sendReserved[d.id] ?? 0));
   }
@@ -142,6 +225,7 @@ export class CompanionHost {
 
   // ------------------------------------------------------------------ relay connection
   start(): boolean {
+    this.stopped = false;
     const enr = this.store.enrollment();
     const cfg = this.store.config();
     const url = enr?.relayUrl || cfg.relayUrl;
@@ -168,6 +252,7 @@ export class CompanionHost {
   }
 
   stop(): void {
+    this.stopped = true;
     this.conn?.stop(); this.conn = null;
     if (this.house) clearInterval(this.house);
     if (this.pushTimer) clearTimeout(this.pushTimer);
@@ -175,6 +260,7 @@ export class CompanionHost {
     for (const a of this.alertAsks.values()) if (a.timer) clearTimeout(a.timer);
     this.pushTimer = null; this.alertTimer = null;
     for (const s of this.sessions.sessions.values()) this.sessions.clearPending(s, 'stop');
+    this.control.stop();
   }
 
   // ------------------------------------------------------------------ pairing
@@ -239,7 +325,7 @@ export class CompanionHost {
     await this.sendTo(d, 'revoked', { reason: 'removed' }, 60_000).catch(() => undefined);
     this.devices = this.devices.filter((x) => x.id !== d.id);
     this.store.saveDevices(this.devices);
-    this.revoked.add(d.id); this.guard.forget(d.id); this.counters.delete(d.id);
+    this.revoked.add(d.id); this.guard.forget(d.id); this.counters.delete(d.id); this.control.forgetDevice(d.id);
     const rev = await signRevocation(this.identity, { v: 1, host: this.identity.id, dev: d.id, iat: this.now() });
     const st = this.store.state(); st.revocations = [...st.revocations, rev].slice(-200); this.store.saveState(st);
     this.conn?.send({ t: 'revoke', rev });
@@ -262,13 +348,14 @@ export class CompanionHost {
   }
 
   /**
-   * The state as one device gets it: `long` for a page that said it can read long messages (and a relay that carries big frames), otherwise the short
-   * form every version understands (see stateview.ts). Every form stays inside one padded frame.
+   * The state as one device gets it: for the protocol revision it said it understands (see PROTO_VERSION), and `long` for a page that said it can read long messages
+   * (and a relay that carries big frames), otherwise the short form every version understands (see stateview.ts). Every form stays inside one padded frame.
    */
-  buildState(rev = this.rev, long = false): StateData {
+  buildState(rev = this.rev, long = false, proto: number = PROTO_VERSION, forDevice?: DeviceRecord): StateData {
     const cfg = this.store.config();
     const presets = cfg.presets.map((p) => ({ id: p.id, label: p.label }));
-    const full = this.sessions.toState(rev, { name: cfg.name, paused: cfg.paused, confirm: cfg.confirm, devices: this.devices.map((d) => ({ id8: d.id.slice(0, 8), name: d.name, lastSeen: d.lastSeen === null ? null : Math.floor(d.lastSeen / 60_000) * 60_000 })) }, presets);
+    const ctl = proto >= 3 && forDevice ? this.control.hostCtl(forDevice) : undefined;
+    const full = this.sessions.toState(rev, { name: cfg.name, paused: cfg.paused, confirm: cfg.confirm, ...(this.isAway() ? { away: true } : {}), ...(ctl ? { ctl } : {}), devices: this.devices.map((d) => ({ id8: d.id.slice(0, 8), name: d.name, lastSeen: d.lastSeen === null ? null : Math.floor(d.lastSeen / 60_000) * 60_000, scope: d.scope ?? 'answer' })) }, presets, proto, forDevice && proto >= 3 ? (s) => this.control.sessionCtl(forDevice, s) : undefined);
     return StateSchema.parse(long ? fitLong(full, this.longBudget()) : toLegacy(full));
   }
 
@@ -288,26 +375,29 @@ export class CompanionHost {
     const due = this.now() + wait;
     if (this.pushTimer) { if (this.pushDue <= due) return; clearTimeout(this.pushTimer); }
     this.pushDue = due;
-    this.pushTimer = setTimeout(() => { this.pushTimer = null; void this.pushState(); }, wait);
+    this.pushTimer = setTimeout(() => { this.pushTimer = null; void this.pushState().catch((e: unknown) => this.store.audit('state_push_failed', { err: String((e as Error)?.message ?? e).slice(0, 100) })); }, wait);
     this.pushTimer.unref?.();
   }
 
   /** sends the current state to every device whose last state differs (or to `only`; `force` sends it even if unchanged, e.g. when a device asks to sync) */
   async pushState(only?: DeviceRecord, force = false): Promise<void> {
     if (!this.conn?.online) return;
-    const forms = new Map<boolean, { st: StateData; sig: string }>();
-    const form = (long: boolean): { st: StateData; sig: string } => {
-      let f = forms.get(long);
-      if (!f) { const st = this.buildState(this.rev, long); f = { st, sig: JSON.stringify({ ...st, rev: 0 }) }; forms.set(long, f); }
+    // one form per (protocol revision, long or short) in use: a phone that only knows proto 1 gets the sessions and fields it can parse
+    const forms = new Map<string, { st: StateData; sig: string }>();
+    // a protocol 3 device's state also depends on what it may do (scope, step-up kind), so those are part of the form
+    const form = (long: boolean, proto: number, d: DeviceRecord): { st: StateData; sig: string } => {
+      const k = proto >= 3 ? `${proto}:${long}:${d.scope ?? 'answer'}:${d.cred ? 'w' : 'l'}:${d.confirmEvery ? 'c' : '-'}` : `${proto}:${long}`;
+      let f = forms.get(k);
+      if (!f) { const st = this.buildState(this.rev, long, proto, d); f = { st, sig: JSON.stringify({ ...st, rev: 0 }) }; forms.set(k, f); }
       return f;
     };
-    // the signature includes the form, so a phone that just said it can read long messages gets its state again in that form
-    const targets = (only ? [only] : this.devices).filter((d) => force || this.lastSig.get(d.id) !== form(this.canLong(d)).sig);
+    // the signature includes the form, so a phone that just said it can read long messages (or revision 2) gets its state again in that form
+    const targets = (only ? [only] : this.devices).filter((d) => force || this.lastSig.get(d.id) !== form(this.canLong(d), d.proto ?? 1, d).sig);
     if (targets.length === 0) return;
     this.rev += 1; this.lastPushAt = this.now();
     const st = this.store.state(); st.rev = this.rev; this.store.saveState(st);
     for (const d of targets) {
-      const f = form(this.canLong(d));
+      const f = form(this.canLong(d), d.proto ?? 1, d);
       this.lastSig.set(d.id, f.sig);
       await this.sendTo(d, 'state', { ...f.st, rev: this.rev }, STATE_TTL_MS, STATE_REPLACE_KEY).catch(() => undefined);
     }
@@ -434,8 +524,10 @@ export class CompanionHost {
   private senderKey = (id: string): Uint8Array | null => { const d = this.devices.find((x) => x.id === id); return d ? unb64u(d.sig) : null; };
 
   private async onFrame(f: Frame): Promise<void> {
+    if (this.stopped) return; // a stopped host does not handle frames that were already on their way (and must not write into a directory that is going away)
     const peek = peekHeader(f);
     const r = await openMessage(f, { me: { id: this.identity.id, ring: this.ring }, senderKey: this.senderKey, isRevoked: (id) => this.revoked.has(id), guard: this.guard, now: this.now() });
+    if (this.stopped) return;
     if (peek) this.conn?.ack(peek.header.m);
     if (!r.ok) { this.store.audit('frame_rejected', { code: r.code }); return; }
     const st = this.store.state(); st.replay = this.guard.snapshot(); this.store.saveState(st);
@@ -445,6 +537,9 @@ export class CompanionHost {
       case 'sync': {
         const c = SyncData.safeParse(r.msg.data);
         const caps = c.success ? (c.data.caps ?? []) : [];
+        // a phone says which protocol revision it understands; an older one says nothing and stays on 1
+        const proto = c.success ? Math.min(c.data.proto ?? 1, PROTO_VERSION) : 1;
+        if ((dev.proto ?? 1) !== proto) { dev.proto = proto; this.store.saveDevices(this.devices); this.lastSig.delete(dev.id); }
         if (JSON.stringify(caps) !== JSON.stringify(dev.caps ?? [])) { if (caps.length) dev.caps = caps; else delete dev.caps; this.store.saveDevices(this.devices); }
         await this.pushState(dev, true);
         return this.sendAck(dev);
@@ -458,6 +553,8 @@ export class CompanionHost {
         this.store.audit('device_rekey', { device: dev.id.slice(0, 8), epoch: k.data.ep });
         return;
       }
+      case 'watch': case 'history': case 'prompt': case 'interrupt': case 'start': case 'answer': case 'su_begin': case 'su_assert': case 'su_regbegin': case 'su_reg':
+        return this.control.onFrame(dev, r.msg.kind, r.msg.data);
       case 'action': {
         const a = ActionData.safeParse(r.msg.data);
         if (!a.success) { this.store.audit('action_rejected', { why: 'schema' }); return; }
@@ -471,62 +568,88 @@ export class CompanionHost {
   private async onAction(dev: DeviceRecord, a: ActionData): Promise<void> {
     const cfg = this.store.config();
     const t = this.now();
-    const result = async (outcome: 'applied' | 'denied' | 'expired' | 'stale' | 'rejected' | 'needs_local' | 'paused' | 'rate_limited' | 'failed', note?: string): Promise<void> => {
+    const result = async (outcome: Outcome, note?: string): Promise<void> => {
       this.store.audit('action', { device: dev.id.slice(0, 8), a: a.a, outcome, rid: a.rid });
-      await this.sendTo(dev, 'result', { rid: a.rid, outcome, ...(note ? { note } : {}) }, ACTION_RESULT_TTL_MS).catch(() => undefined);
+      // a phone that only knows protocol 1 has no `sent`: it is told "applied" with the note saying what is true
+      const old = (dev.proto ?? 1) < 2 && outcome === 'sent';
+      const n = old ? 'sent to the agent; its own confirmation was not seen' : note;
+      await this.sendTo(dev, 'result', { rid: a.rid, outcome: old ? 'applied' : outcome, ...(n ? { note: n } : {}) }, ACTION_RESULT_TTL_MS).catch(() => undefined);
     };
     if (cfg.paused) return result('paused');
-    this.limiter ??= new ActionLimiter(cfg.maxActionsPerMinute, cfg.maxActionsPerHour);
-    if (!this.limiter.allow(t)) return result('rate_limited');
+    // protocol 3: a device that was only given `observe` can read but not answer (devices paired before 0.3.0 have `answer`, as they always did)
+    if (!scopeAtLeast(dev.scope, 'answer')) return result('rejected', 'this device can only watch');
+    if (!this.actionLimiter().allow(t)) return result('rate_limited');
     const s = this.sessions.bySid(a.sid);
     const p = s?.pending;
     if (!s || !p || p.pub.rid !== a.rid) return result('stale');
     if (p.pub.bind !== a.bind) return result('stale');
     if (t > p.pub.expires) return result('expired');
 
-    let text: string | undefined; let presetId: string | undefined;
+    // what the person asked for, as an adapter answer. Every text is the host's own: a configured preset, or the text of an option the tool offered.
+    let answer: Answer; let presetId: string | undefined; let tooltext = '';
     if (a.a === 'reply') {
-      if (p.pub.kind === 'permission' || !p.can.reply) return result('rejected', 'cannot reply here');
-      const preset = cfg.presets.find((x) => x.id === a.opt);
-      const optText = a.opt ? p.optionText?.[a.opt] : undefined;
-      if (preset) { text = preset.text; presetId = preset.id; } else if (optText) text = optText;
-      else return result('rejected', 'unknown choice');
-    } else if (p.pub.kind !== 'permission' || !p.can.approve) return result('rejected', 'cannot approve here');
+      if (p.pub.kind === 'permission') {
+        // "Deny and say ...": a reply on a permission request is a denial carrying one of the host's non-affirming presets
+        const preset = cfg.presets.find((x) => x.id === a.opt);
+        if (!p.denyWithPreset || !(p.can.approve || p.can.deny) || !preset || !p.pub.denyWith?.includes(preset.id)) return result('rejected', 'cannot reply here');
+        answer = { t: 'permission', behavior: 'deny', message: asPreset(preset.text) }; presetId = preset.id; tooltext = preset.text;
+      } else {
+        if (!p.can.reply) return result('rejected', 'cannot reply here');
+        const preset = cfg.presets.find((x) => x.id === a.opt);
+        const optText = a.opt ? p.optionText?.[a.opt] : undefined;
+        if (preset) { answer = { t: 'preset', text: asPreset(preset.text), presetId: preset.id }; presetId = preset.id; tooltext = preset.text; }
+        else if (optText && a.opt) { answer = { t: 'option', optionId: a.opt, text: asPreset(optText) }; tooltext = optText; }
+        else return result('rejected', 'unknown choice');
+      }
+    } else if (p.pub.kind !== 'permission' || !(a.a === 'deny' ? (p.can.approve || p.can.deny) : p.can.approve)) return result('rejected', a.a === 'deny' ? 'cannot deny here' : 'cannot approve here');
+    else answer = { t: 'permission', behavior: a.a === 'approve' ? 'allow' : 'deny' };
 
-    if (needsLocalConfirmation(cfg, { kind: a.a, tool: p.tool, presetId })) {
+    const adapter = p.route ? this.hub.get(p.route.adapter) : undefined;
+    if (!p.route || !adapter) return result('failed', 'the agent can no longer be reached');
+    const floor = adapter.manifest.confirmFloor;
+    const denies = answer.t === 'permission' && answer.behavior === 'deny';
+    if (needsLocalConfirmation(cfg, { kind: denies ? 'deny' : a.a === 'reply' ? 'reply' : 'approve', tool: p.tool, presetId, risk: p.pub.risk, floor: a.a === 'reply' ? floor.reply : floor.approve })) {
       await result('needs_local');
-      const ok = await withTimeout(this.opts.confirmer({ kind: a.a === 'reply' ? 'reply' : 'approve', agent: s.agent, label: s.label, tool: p.tool, preview: a.a === 'reply' ? (text ?? '') : p.pub.preview, device: dev.name }), CONFIRM_TIMEOUT_MS);
+      const ok = await withTimeout(this.opts.confirmer({ kind: a.a === 'reply' ? 'reply' : 'approve', agent: s.agent, label: s.label, tool: p.tool, preview: a.a === 'reply' ? tooltext : p.pub.preview, device: dev.name }), CONFIRM_TIMEOUT_MS);
       if (!ok) { // no or timeout: deny (permission) or drop (reply)
-        if (a.a !== 'reply' && this.deliverPermission(s, 'deny', dev.name)) this.afterAnswer(s);
+        if (p.pub.kind === 'permission') { const d = await this.deliver(s, p, { t: 'permission', behavior: 'deny' }, dev.name); if (d === 'delivered') this.afterAnswer(s); }
         return result('denied', 'not confirmed on the computer');
       }
       if (this.sessions.bySid(a.sid)?.pending?.pub.rid !== a.rid) return result('stale');
     }
 
-    const delivered = a.a === 'reply' ? this.deliverText(s, text!, dev.name, presetId) : this.deliverPermission(s, a.a === 'approve' ? 'allow' : 'deny', dev.name);
-    if (!delivered) return result('failed', 'the agent can no longer be reached');
+    // an allow is only called "applied" once the tool's own follow-up is seen (adapters whose tool answers synchronously, like a Claude Code channel, are the exception)
+    const allows = answer.t === 'permission' && answer.behavior === 'allow';
+    const watch = allows && adapter.manifest.observesOutcome ? this.hub.expectResolved(p.route.native.id, this.opts.resolveWaitMs ?? 10_000) : null;
+    const d = await this.deliver(s, p, answer, dev.name);
+    if (d !== 'delivered') {
+      watch?.cancel();
+      if (d === 'gone' || d === 'changed') return result('stale');
+      if (d === 'unsupported') return result('rejected', 'this agent cannot take that answer');
+      return result('failed', 'the agent can no longer be reached');
+    }
     this.afterAnswer(s);
-    return result(a.a === 'deny' ? 'denied' : 'applied');
+    if (!allows && a.a === 'deny') return result('denied');
+    if (answer.t === 'permission' && answer.behavior === 'deny') return result('denied');
+    if (!watch) return result('applied');
+    const seen = await watch.done;
+    return result(seen === 'allowed' ? 'applied' : 'sent');
   }
 
   private afterAnswer(s: Sess): void {
-    delete s.pending;
+    this.sessions.clearPending(s, 'answered');
     this.sessions.setStatus(s, 'working');
     this.schedulePush();
   }
 
-  private deliverPermission(s: Sess, behavior: 'allow' | 'deny', device: string): boolean {
-    const p = s.pending;
-    if (!p) return false;
-    if (p.route.hook) { p.route.hook.resolve({ behavior, ...(behavior === 'deny' ? { message: `Denied from "${device}" via Botwarren Companion` } : {}) }); p.route = {}; return true; }
-    if (p.route.channelRequestId && s.channel) return s.channel.send({ ev: 'permission', request_id: p.route.channelRequestId, behavior });
-    return false;
-  }
-
-  private deliverText(s: Sess, text: string, device: string, presetId?: string): boolean {
-    if (!s.channel) return false;
-    const safeName = device.replace(/[^A-Za-z0-9 _.-]/g, '').slice(0, 40);
-    return s.channel.send({ ev: 'message', content: text, meta: { via: 'botwarren_companion', device: safeName.replace(/ /g, '_'), ...(presetId ? { preset: presetId.replace(/[^A-Za-z0-9_]/g, '_') } : { choice: 'agent_option' }) } });
+  /** revalidate the native request (it must still be the one the phone was shown), then hand the answer to the adapter that owns it */
+  private async deliver(s: Sess, p: PendingInternal, answer: Answer, device: string): Promise<'delivered' | 'gone' | 'changed' | 'unsupported' | 'failed'> {
+    const route = p.route;
+    if (!route || s.pending !== p) return 'gone';
+    const v = await this.hub.revalidate(route.native);
+    if (v !== 'live') return v === 'changed' ? 'changed' : 'gone';
+    if (s.pending !== p) return 'gone';
+    return this.hub.deliver(route.native, answer, { device });
   }
 
   // ------------------------------------------------------------------ housekeeping and rotation
@@ -534,6 +657,11 @@ export class CompanionHost {
     const t = this.now();
     const before = JSON.stringify([...this.sessions.sessions.values()].map((s) => [s.sid, s.status, !!s.pending]));
     this.sessions.prune();
+    this.control.housekeeping();
+    // a hand edit or the CLI changed the switches the devices see (pause, remote control): they hear about it within the housekeeping interval
+    const cs = JSON.stringify([this.store.config().paused, this.store.config().control]);
+    if (this.lastConfigSig !== null && cs !== this.lastConfigSig) this.configChanged();
+    this.lastConfigSig = cs;
     if (this.ring.prune(t) > 0) await this.saveRing();
     await this.maybeRotate();
     if (JSON.stringify([...this.sessions.sessions.values()].map((s) => [s.sid, s.status, !!s.pending])) !== before) this.schedulePush();

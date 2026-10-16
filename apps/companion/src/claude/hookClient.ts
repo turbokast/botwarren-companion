@@ -33,7 +33,8 @@ function hookSignals(): void {
   for (const sig of ['SIGTERM', 'SIGINT', 'SIGHUP'] as const) process.on(sig, () => { for (const f of [...active]) f(null); });
 }
 
-export async function runHook(event: string, stdin: string, env: Record<string, string | undefined> = process.env, maxWaitMs = 600_000): Promise<string | null> {
+/** `tool`: which tool's hook this is (`claude-code` when the hook command has no `--tool`, as in the hooks 0.1.x wrote) */
+export async function runHook(event: string, stdin: string, env: Record<string, string | undefined> = process.env, maxWaitMs = 600_000, tool = 'claude-code'): Promise<string | null> {
   hookSignals();
   const dir = homeDir(env);
   let token: string;
@@ -47,7 +48,7 @@ export async function runHook(event: string, stdin: string, env: Record<string, 
     const timer = setTimeout(() => finish(null), maxWaitMs);
     sock.setEncoding('utf8');
     let buf = '';
-    sock.on('connect', () => sock.write(JSON.stringify({ id: 1, token, op: 'hook', event, input, ancestors: ancestors(process.ppid) }) + '\n'));
+    sock.on('connect', () => sock.write(JSON.stringify({ id: 1, token, op: 'hook', tool, event, input, ancestors: ancestors(process.ppid) }) + '\n'));
     sock.on('data', (c: string) => {
       buf += c;
       const i = buf.indexOf('\n');

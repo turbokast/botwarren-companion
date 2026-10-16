@@ -14,7 +14,9 @@ async function main(): Promise<number> {
     const { runHook } = await import('./claude/hookClient.ts');
     const chunks: Buffer[] = [];
     for await (const c of process.stdin) chunks.push(c as Buffer);
-    const out = await runHook(String(argv[1] ?? ''), Buffer.concat(chunks).toString('utf8'));
+    const ti = argv.indexOf('--tool');
+    const tool = ti >= 0 && /^[a-z0-9-]{2,20}$/.test(argv[ti + 1] ?? '') ? argv[ti + 1]! : 'claude-code';
+    const out = await runHook(String(argv[1] ?? ''), Buffer.concat(chunks).toString('utf8'), process.env, undefined, tool);
     if (out) process.stdout.write(out + '\n');
     return 0; // always: a hook problem must never disturb Claude Code
   }

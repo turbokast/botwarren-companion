@@ -1,0 +1,17 @@
+{
+  "tool": "codex",
+  "version": "0.162.1",
+  "captured": "2026-10-15",
+  "source": "observed",
+  "how": "spike S-C1: interactive TUI in a pty, scripted local Responses provider (no real model call), isolated CODEX_HOME; hook stdin recorded verbatim apart from paths and ids",
+  "event": "SessionStart",
+  "input": {
+    "session_id": "019a0000-0000-7000-8000-000000000001",
+    "transcript_path": "/home/user/.codex/sessions/2026/10/15/rollout-2026-10-15T00-00-00-019a0000-0000-7000-8000-000000000001.jsonl",
+    "cwd": "/work/spike-repo",
+    "hook_event_name": "SessionStart",
+    "model": "mock-model",
+    "permission_mode": "default",
+    "source": "startup"
+  }
+}

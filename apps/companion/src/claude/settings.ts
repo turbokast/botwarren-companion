@@ -11,6 +11,13 @@ import { isVersionedPath } from './launcher.ts';
 export const MARKER = '--bw-companion';
 export const HOOK_EVENTS = ['SessionStart', 'UserPromptSubmit', 'PermissionRequest', 'Notification', 'Stop', 'PostToolUse', 'SessionEnd'] as const;
 export type HookEvent = (typeof HOOK_EVENTS)[number];
+/**
+ * Remote control (protocol 3, WP9) needs ONE more hook: PreToolUse. It is OPT-IN (`claude install-hooks --control`), never part of the default set, because it
+ * runs before EVERY tool call of every session (a short local round trip, failing open) and is what lets the companion (a) stop a session at its next tool
+ * call when the owner asks from a paired device, and (b) answer an AskUserQuestion from a paired device while a hold is configured. It reports to the same
+ * local daemon as the other hooks and changes nothing by itself.
+ */
+export const CONTROL_EVENT = 'PreToolUse';
 
 interface Hook { type: string; command?: string; timeout?: number; async?: boolean; [k: string]: unknown }
 interface Group { matcher?: string; hooks?: Hook[]; [k: string]: unknown }
@@ -50,18 +57,34 @@ export function readSettings(path: string): Settings {
 }
 
 /** returns the new settings object without writing anything */
-export function withHooks(cur: Settings, o: { node: string; script: string; holdSeconds: number }): Settings {
+/**
+ * `control`: true adds the PreToolUse control hook, false removes it, undefined keeps what is there (an update that re-runs install-hooks must not silently
+ * switch remote control off or on).
+ */
+export function withHooks(cur: Settings, o: { node: string; script: string; holdSeconds: number; control?: boolean }): Settings {
   const out: Settings = JSON.parse(JSON.stringify(cur)) as Settings;
   out.hooks ??= {};
-  for (const ev of HOOK_EVENTS) {
+  const control = o.control ?? hasControlHook(cur);
+  for (const ev of control ? [...HOOK_EVENTS, CONTROL_EVENT] : HOOK_EVENTS) {
     const groups = (out.hooks[ev] ??= []).map((g) => ({ g, before: g.hooks?.length ?? 0, hooks: (g.hooks ?? []).filter((h) => !isOurs(h)) }))
       .filter((x) => !(x.before > 0 && x.hooks.length === 0)) // a group that held only our hook goes away; a user's own empty group is left alone
       .map((x) => ({ ...x.g, hooks: x.hooks }));
-    const hook: Hook = { type: 'command', command: hookCommand(ev, o), timeout: ev === 'PermissionRequest' ? o.holdSeconds + 10 : 10, ...(ev === 'PostToolUse' ? { async: true } : {}) };
-    groups.push({ ...(ev === 'PostToolUse' || ev === 'PermissionRequest' ? { matcher: '*' } : {}), hooks: [hook] });
+    // the PreToolUse hook may hold an AskUserQuestion for the hold time, so its timeout covers it; it is NOT async (its answer is what stops a tool call)
+    const hook: Hook = { type: 'command', command: hookCommand(ev, o), timeout: ev === 'PermissionRequest' || ev === CONTROL_EVENT ? o.holdSeconds + 10 : 10, ...(ev === 'PostToolUse' ? { async: true } : {}) };
+    groups.push({ ...(ev === 'PostToolUse' || ev === 'PermissionRequest' || ev === CONTROL_EVENT ? { matcher: '*' } : {}), hooks: [hook] });
     out.hooks[ev] = groups;
   }
+  if (!control) {
+    // control switched off: our PreToolUse entry goes, anything else on that event stays
+    const gs = (out.hooks[CONTROL_EVENT] ?? []).map((g) => ({ g, before: g.hooks?.length ?? 0, hooks: (g.hooks ?? []).filter((h) => !isOurs(h)) })).filter((x) => !(x.before > 0 && x.hooks.length === 0)).map((x) => ({ ...x.g, hooks: x.hooks }));
+    if (gs.length) out.hooks[CONTROL_EVENT] = gs; else delete out.hooks[CONTROL_EVENT];
+  }
   return out;
+}
+
+/** is OUR PreToolUse control hook present? */
+export function hasControlHook(cur: Settings): boolean {
+  return (cur.hooks?.[CONTROL_EVENT] ?? []).some((g) => (g.hooks ?? []).some(isOurs));
 }
 
 export function withoutHooks(cur: Settings): Settings {

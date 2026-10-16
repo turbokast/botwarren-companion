@@ -6,6 +6,10 @@ import { ago, h, mount } from './ui.ts';
 import { clearShown, detectSupport, disable as disableAlerts, enable as enableAlerts, permission, sendTest, wantsAlerts, type AlertResult, type SwPin, type TestResult } from './alerts.ts';
 import { termBox } from './terminal.ts';
 import type { Pending, SessionState } from '../../src/protocol/index.ts';
+import { fromLink, type ControlTransport } from './control/adapter.ts';
+import { createProtocol3Transport } from './control/protocol3.ts';
+import { ControlUi, harnessName, HARNESS_NAME } from './control/ui.ts';
+import type { CSession, ControlApi } from './control/types.ts';
 
 export interface BuildInfo { build: string; version: string; keyId: string; expires: string; sw?: SwPin }
 
@@ -63,14 +67,15 @@ const TEST_STEP: Record<'asked' | 'computer' | 'pushed', string> = {
   pushed: 'Test: the push service has it. Waiting for it to reach this phone...',
 };
 
-type Screen = { t: 'pair'; prefill: string; error?: string } | { t: 'sas'; sas: string; note?: string } | { t: 'home' } | { t: 'card'; sid: string } | { t: 'devices' } | { t: 'gone'; why: string };
+type Screen = { t: 'pair'; prefill: string; error?: string } | { t: 'sas'; sas: string; note?: string } | { t: 'home'; sel?: string } | { t: 'card'; sid: string } | { t: 'devices' } | { t: 'gone'; why: string } | { t: 'audit' } | { t: 'start' };
 
 const OUTCOME_TEXT: Record<Outcome | 'timeout' | 'offline', { tone: 'good' | 'warn' | 'bad' | 'info'; text: string }> = {
   applied: { tone: 'good', text: 'Done. Your agent is working again.' },
+  sent: { tone: 'info', text: 'Sent. Your answer reached the agent, but it has not confirmed yet, so this is not called done. The card updates when the agent moves on.' },
   denied: { tone: 'good', text: 'Denied. Nothing ran.' },
   expired: { tone: 'bad', text: 'Expired. Your agent stopped waiting. Nothing was sent.' },
   stale: { tone: 'warn', text: 'This changed. Your agent asked something new, so this card was closed. Open it again to see what it asks now.' },
-  rejected: { tone: 'warn', text: 'Your computer did not accept that here. Answer at the terminal.' },
+  rejected: { tone: 'warn', text: 'Your computer did not accept that here. Answer on your computer.' },
   needs_local: { tone: 'warn', text: 'Waiting for you on your computer. Your computer asks you to confirm this one there.' },
   paused: { tone: 'bad', text: 'Remote answers are paused on your computer.' },
   rate_limited: { tone: 'warn', text: 'Too many answers in a short time. Wait a minute.' },
@@ -79,11 +84,36 @@ const OUTCOME_TEXT: Record<Outcome | 'timeout' | 'offline', { tone: 'good' | 'wa
   offline: { tone: 'bad', text: 'Not connected. Reconnecting.' },
 };
 
-export async function start(info: BuildInfo): Promise<void> {
+/** the name of each kind of agent on a card; a kind this page does not know (a newer companion) is "Another agent" */
+export { HARNESS_NAME };
+export const agentName = (s: Pick<SessionState, 'agent'>): string => harnessName(s.agent);
+
+/** words for the risk chips; a tag this page does not know is shown as its own words (letters and underscores only, so it cannot carry anything else) */
+const RISK_TEXT: Record<string, { text: string; tone: 'warn' | 'bad' | 'info' }> = {
+  outside_workspace: { text: 'Outside the project', tone: 'warn' },
+  network: { text: 'Network', tone: 'bad' },
+  protected_write: { text: 'Protected file', tone: 'warn' },
+  escalated: { text: 'Wider access', tone: 'bad' },
+  destructive: { text: 'Destructive', tone: 'bad' },
+  unknown_tool: { text: 'Unknown tool', tone: 'warn' },
+  screen_sourced: { text: 'From the terminal screen', tone: 'info' },
+};
+export const riskChip = (tag: string): { text: string; tone: 'warn' | 'bad' | 'info' } => RISK_TEXT[tag] ?? { text: tag.replace(/_/g, ' '), tone: 'warn' };
+
+export interface StartOptions {
+  /** test harness: a scripted ControlApi instead of the real link (no pairing, no alerts) */
+  api?: ControlApi;
+  /** protocol 3 commands, when the computer's Companion supports them (supplied by the core's client module) */
+  transport?: ControlTransport;
+}
+
+const OPEN_REF = /^#\/open\/([A-Za-z0-9_-]{4,64})$/;
+
+export async function start(info: BuildInfo, opts: StartOptions = {}): Promise<void> {
   const root = document.getElementById('root');
   if (!root) return;
-  let link = await Link.load().catch(() => null);
-  let screen: Screen = link ? { t: 'home' } : { t: 'pair', prefill: codeFromHash() };
+  let link = opts.api ? null : await Link.load().catch(() => null);
+  let screen: Screen = link || opts.api ? { t: 'home' } : { t: 'pair', prefill: codeFromHash() };
   let notice: { tone: 'good' | 'warn' | 'bad' | 'info'; text: string } | null = null;
   let lastWaiting = 0;
   let wantRid: string | null = ridFromHash();
@@ -170,15 +200,38 @@ export async function start(info: BuildInfo): Promise<void> {
   /** a tap on an alert (or a link to one) opens that request, if it is still waiting, and says so truthfully if it is not */
   function resolveWant(): void {
     if (wantRid === null) return;
-    if (!link) { wantRid = null; return; }
-    if (!link.state) return; // wait for the first state (a timer gives up)
+    const u = ui();
+    if (!u) { wantRid = null; return; }
+    if (!u.api.host().ready) return; // wait for the first state (a timer gives up)
     const rid = wantRid; wantRid = null;
     if (wantTimer) { clearTimeout(wantTimer); wantTimer = null; }
     try { history.replaceState(null, '', location.pathname); } catch { /* the address stays */ }
-    const s = rid === 'any' ? undefined : link.state.sessions.find((x) => x.pending?.rid === rid);
-    if (s) { screen = { t: 'card', sid: s.sid }; notice = null; return; }
+    const s = rid === 'any' ? undefined : u.api.sessions().find((x) => x.state.pending?.rid === rid);
+    if (s) { screen = wide() ? { t: 'home', sel: s.sid } : { t: 'card', sid: s.sid }; notice = null; return; }
     screen = { t: 'home' };
     notice = rid === 'any' ? null : { tone: 'info', text: 'That request was already answered, or it expired. Nothing is waiting on it now.' };
+  }
+  /** the station's "Control" link (#/open/<ref>) opens the session of that robot, if it is one of this computer's right now */
+  let wantRef: string | null = OPEN_REF.exec(location.hash)?.[1] ?? null;
+  let refTimer: ReturnType<typeof setTimeout> | null = null;
+  function resolveRef(): void {
+    if (wantRef === null) return;
+    const u = ui();
+    if (!u) { wantRef = null; return; }
+    if (!u.api.host().ready) return;
+    const ref = wantRef; wantRef = null;
+    if (refTimer) { clearTimeout(refTimer); refTimer = null; }
+    try { history.replaceState(null, '', location.pathname); } catch { /* the address stays */ }
+    const s = u.api.sessions().find((x) => x.station === ref || x.sid === ref);
+    if (s) { screen = wide() ? { t: 'home', sel: s.sid } : { t: 'card', sid: s.sid }; notice = null; return; }
+    screen = { t: 'home' };
+    notice = { tone: 'info', text: 'That robot is not one of the sessions on your computer right now. It may have finished, or it is on another computer.' };
+  }
+  function wantRobot(ref: string): void {
+    wantRef = ref;
+    if (refTimer) clearTimeout(refTimer);
+    refTimer = setTimeout(() => { if (wantRef !== null) { wantRef = null; notice = { tone: 'warn', text: 'No answer from your computer yet. It may be offline.' }; render(); } }, 10_000);
+    render();
   }
   function want(rid: string | null): void {
     wantRid = rid ?? 'any';
@@ -220,76 +273,128 @@ export async function start(info: BuildInfo): Promise<void> {
       h('button', { class: 'ghost full', onclick: () => go({ t: 'pair', prefill: '' }) }, 'Cancel'))];
   }
 
-  function statusPill(l: Link): HTMLElement {
-    if (l.conn !== 'online') return h('span', { class: 'pill off', 'data-testid': 'conn' }, l.conn === 'killed' ? 'Switched off' : 'Connecting');
-    if (l.hostOnline === false) return h('span', { class: 'pill off', 'data-testid': 'conn' }, 'Computer offline');
-    return h('span', { class: 'pill live', 'data-testid': 'conn' }, 'Computer online');
-  }
+  const wide = (): boolean => { try { return window.matchMedia('(min-width: 900px)').matches; } catch { return false; } };
+  const openSession = (sid: string): void => { if (wide()) { screen = { t: 'home', sel: sid }; notice = null; render(); } else go({ t: 'card', sid }); };
 
-  function row(s: SessionState): HTMLElement {
-    const waiting = !!s.pending;
-    const what = !s.pending ? (s.status === 'working' ? 'working' : s.status) : s.pending.kind === 'permission' ? (s.pending.tool ? 'asks permission' : 'waiting for you') : s.pending.kind === 'question' ? 'asks a question' : 'waiting for your next instruction';
-    return h('button', { class: `agent${waiting ? ' need' : s.status === 'working' ? ' work' : ''}`, 'data-testid': waiting ? 'waiting-row' : 'row', onclick: () => go({ t: 'card', sid: s.sid }) },
-      h('span', { class: 'dot' }), h('span', { class: 'grow' }, h('b', {}, s.label), h('span', { class: 'sub' }, `Claude Code · ${what} · ${ago(s.since)}`)), waiting ? h('span', { class: 'chev' }, '›') : null);
-  }
-
-  function homeView(l: Link): HTMLElement[] {
-    const st = l.state;
-    const waiting = st?.sessions.filter((x) => x.pending) ?? [];
-    const rest = st?.sessions.filter((x) => !x.pending) ?? [];
-    return [top(h('button', { class: 'iconbtn', 'aria-label': 'Devices and settings', 'data-testid': 'gear', onclick: () => go({ t: 'devices' }) }, '⚙')), h('div', { class: 'col page' },
-      h('div', { class: 'row between' }, statusPill(l), h('span', { class: 'mini' }, st ? `${st.host.name} · updated ${ago(Date.now())}` : '')),
-      st?.host.paused ? h('div', { class: 'callout bad' }, 'Remote answers are paused on your computer.') : null,
+  /** the person's own session list and, on a wide screen, the open session beside it */
+  function homeView(sel: string | null): HTMLElement[] {
+    const u = ui();
+    if (!u) return pairView({ t: 'pair', prefill: '' });
+    const l = link;
+    const st = l?.state;
+    const sessions = u.api.sessions();
+    const chosen = wide() ? (sel && sessions.some((x) => x.sid === sel) ? sel : (sessions.find((x) => x.status === 'needs_you') ?? sessions.find((x) => x.status !== 'ended') ?? sessions[0])?.sid ?? null) : null;
+    u.syncWatch(chosen);
+    const ho = u.api.host();
+    const gear = l ? h('button', { class: 'iconbtn', 'aria-label': 'Devices and settings', 'data-testid': 'gear', onclick: () => go({ t: 'devices' }) }, '⚙') : undefined;
+    const right = h('span', { class: 'row gap' }, u.controlChip(), gear ?? null);
+    const left: (HTMLElement | null)[] = [
+      ...u.banners(),
+      ho.paused ? h('div', { class: 'callout bad' }, 'Remote answers are paused on your computer.') : null,
+      ho.away ? h('div', { class: 'callout warn', 'data-testid': 'away' }, h('b', {}, 'You are away. '), 'Codex and Muse wait for you up to 45 seconds before their own question shows on your computer. Turn it off on your computer with ', h('span', { class: 'mono' }, 'botwarren-companion away off'), '.') : null,
       notice ? h('div', { class: `callout ${notice.tone}`, role: 'status', 'data-testid': 'notice' }, notice.text) : null,
-      l.badState ? h('div', { class: 'callout warn', 'data-testid': 'bad-state' }, 'Your computer sent an update this page could not read, so what is shown may be out of date. Reload this page. If it keeps happening, the Companion on your computer and this page are different versions: update the Companion.') : null,
-      alertsPrompt(l),
-      h('p', { class: 'h3' }, `Waiting for you · ${waiting.length}`),
-      ...(waiting.length ? waiting.map((s) => row(s)) : [h('p', { class: 'fine', 'data-testid': 'none-waiting' }, st ? 'Nothing is waiting for you.' : 'Waiting for your computer.')]),
-      rest.length ? h('p', { class: 'h3' }, `Not waiting · ${rest.length}`) : null,
-      ...rest.map((s) => row(s)),
-      h('p', { class: 'fine pushdown' }, 'Nothing here is stored on Botwarren\'s servers.'))];
+      l?.badState ? h('div', { class: 'callout warn', 'data-testid': 'bad-state' }, 'Your computer sent an update this page could not read, so what is shown may be out of date. Reload this page. If it keeps happening, the Companion on your computer and this page are different versions: update the Companion.') : null,
+      l ? alertsPrompt(l) : null,
+      ...u.sessionList(chosen, openSession),
+      ho.supported ? h('div', { class: 'row gap pushdown' }, h('button', { class: 'ghost sp', 'data-testid': 'start-open', onclick: () => go({ t: 'start' }) }, '+ Start a session'), h('button', { class: 'ghost sp', 'data-testid': 'audit-open', onclick: () => { go({ t: 'audit' }); void u.loadAudit(); } }, 'Activity')) : null,
+      h('p', { class: 'fine pushdown' }, 'Nothing here is stored on Botwarren\'s servers.'),
+    ];
+    if (!wide()) return [top(right), h('div', { class: 'col page' }, ...left)];
+    const cs = chosen ? sessions.find((x) => x.sid === chosen) : undefined;
+    return [top(right), h('div', { class: 'panes' }, h('div', { class: 'col pane-list page' }, ...left),
+      h('div', { class: 'col pane-detail' }, cs ? h('div', { class: 'pane-head' }, h('span', { class: 'wm' }, cs.label), h('span', { class: 'spacer' }), u.statusChipFor(cs)) : null,
+        h('div', { class: 'col page', 'data-testid': 'detail' }, ...(cs ? detailNodes(cs) : [h('div', { class: 'callout', 'data-testid': 'pick' }, 'Pick a session on the left.')]))))];
   }
 
-  function cardView(l: Link, sid: string): HTMLElement[] {
-    const s = l.state?.sessions.find((x) => x.sid === sid);
+  let busy = false;
+  function cardView(sid: string): HTMLElement[] {
+    const u = ui();
+    const cs = u?.api.sessions().find((x) => x.sid === sid);
     const back = h('button', { class: 'iconbtn', 'aria-label': 'Back', onclick: () => go({ t: 'home' }) }, '‹');
-    if (!s) return [h('div', { class: 'topbar' }, back, h('span', { class: 'wm' }, 'Gone')), h('div', { class: 'col page' }, h('div', { class: 'callout' }, 'This agent is no longer listed.'))];
+    if (!u || !cs) { u?.syncWatch(null); return [h('div', { class: 'topbar' }, back, h('span', { class: 'wm' }, 'Gone')), h('div', { class: 'col page' }, h('div', { class: 'callout' }, 'This agent is no longer listed.'))]; }
+    u.syncWatch(sid);
+    const bar = h('div', { class: 'topbar' }, back, h('span', { class: 'wm small' }, cs.label), h('span', { class: 'spacer' }), u.statusChipFor(cs));
+    return [bar, ...u.banners(), h('div', { class: 'col page fit', 'data-testid': 'detail' }, ...detailNodes(cs))];
+  }
+
+  /** one session: what it asks (approval, question), its live tail, the message box and Stop */
+  function detailNodes(cs: CSession): HTMLElement[] {
+    const u = ui()!;
+    const l = u.api;
+    const s = cs.state;
     const p = s.pending as (Pending & { can: { approve: boolean; reply: boolean } }) | undefined;
-    const bar = h('div', { class: 'topbar' }, back, h('span', { class: 'wm small' }, s.label), h('span', { class: 'spacer' }));
     const messages = s.recent.map((m, i) => termBox({ key: `${s.sid}:m:${m.ts}:${i}`, title: `Message ${i + 1} of ${s.recent.length}`, text: m.text, cut: m.cut, ask: !!p && i === s.recent.length - 1, testid: 'recent' }));
     const body: (HTMLElement | null)[] = [];
     const send = async (a: 'approve' | 'deny' | 'reply', opt?: string): Promise<void> => {
       if (!p) return;
       busy = true; render();
-      const r = await l.act(s.sid, p, a, opt);
+      const r = await l.answer(cs, a, opt);
       busy = false;
       notice = OUTCOME_TEXT[r];
       screen = { t: 'home' };
       render();
     };
-    if (!p) body.push(h('div', { class: 'callout' }, s.status === 'working' ? 'Working. Nothing needs you right now.' : 'Not waiting for you.'));
-    else if (p.kind === 'permission') {
-      body.push(h('p', { class: 'eyebrow warm' }, p.tool ? 'Claude Code asks permission' : 'Claude Code is waiting for you'));
-      if (p.summary || p.preview) body.push(h('div', { class: 'panel col card' }, h('span', { class: 'lbl' }, p.tool ? `${p.summary} (${p.tool})` : p.summary), p.preview ? termBox({ key: `${s.sid}:p:${p.rid}`, title: p.tool ?? 'Request', text: p.preview, cut: p.cut, ask: true, testid: 'preview' }) : null, h('p', { class: 'fine' }, 'Shown as plain text, exactly what your agent asked.')));
+    const who = agentName(s);
+    const fromScreen = p?.source === 'screen';
+    const chips = [...(p?.risk ?? []), ...(fromScreen && !(p?.risk ?? []).includes('screen_sourced') ? ['screen_sourced'] : [])].map(riskChip);
+    const chipRow = chips.length ? h('div', { class: 'row wrap gap', 'data-testid': 'risk' }, ...chips.map((c) => h('span', { class: `chip${c.tone === 'bad' ? ' bad' : c.tone === 'info' ? ' info' : ''}` }, c.text))) : null;
+    const head = u.sessionChips(cs);
+    if (!p) {
+      body.push(head);
+      if (cs.tail) body.push(u.tailBox(cs));
+      else body.push(h('div', { class: 'callout' }, s.status === 'working' ? 'Working. Nothing needs you right now.' : 'Not waiting for you.'), s.mode === 'bypass' ? h('div', { class: 'callout warn', 'data-testid': 'bypass' }, h('b', {}, 'No approval prompts. '), 'This agent runs without asking permission, so there is nothing to approve. Botwarren shows its state only.') : null, messages.length ? h('p', { class: 'h3' }, 'Last things it said') : null, ...messages);
+      body.push(...u.composeArea(cs), ...u.stopArea(cs));
+      return body.filter((x): x is HTMLElement => x !== null);
+    }
+    body.push(head);
+    if (p.kind === 'permission') {
+      body.push(h('p', { class: 'eyebrow warm' }, p.tool ? `${who} asks permission` : `${who} is waiting for you`), chipRow);
+      if (p.summary || p.preview) {
+        const pv = p.preview ? termBox({ key: `${s.sid}:p:${p.rid}`, title: fromScreen ? 'From the terminal screen' : p.tool ?? 'Request', text: p.preview, cut: p.cut, ask: true, testid: 'preview' }) : null;
+        if (pv && fromScreen) pv.classList.add('screen');
+        body.push(h('div', { class: 'panel col card' }, h('span', { class: 'lbl' }, fromScreen ? 'What the screen shows' : p.tool ? `${p.summary} (${p.tool})` : p.summary), pv, h('p', { class: 'fine' }, fromScreen ? `Read from the terminal, not from ${who}. Treat it as a hint: it can be out of date.` : 'Shown as plain text, exactly what your agent asked.')));
+      }
     } else {
-      body.push(h('p', { class: 'eyebrow warm' }, p.kind === 'question' ? 'Claude Code asks a question' : 'Claude Code is waiting for you'));
-      if (p.kind === 'question' || p.kind === 'idle') body.push(h('div', { class: 'msg ask', 'data-testid': 'pending-summary' }, p.summary));
+      body.push(h('p', { class: 'eyebrow warm' }, p.kind === 'question' ? `${who} asks a question` : `${who} is waiting for you`), chipRow);
+      if (p.kind === 'question' || p.kind === 'idle') body.push(h('div', { class: 'msg ask', 'data-testid': 'pending-summary' }, p.summary), h('p', { class: 'fine' }, 'The agent\'s own words. Botwarren cannot check them.'));
     }
     body.push(messages.length ? h('p', { class: 'h3' }, 'Last things it said') : null, ...messages);
     const actions: HTMLElement[] = [];
-    if (p && p.kind === 'permission') {
-      if (p.can.approve) actions.push(h('div', { class: 'row gap' }, h('button', { class: 'no-btn', 'data-testid': 'deny', disabled: busy, onclick: () => { void send('deny'); } }, 'Deny'), h('button', { class: 'ok-btn', 'data-testid': 'approve', disabled: busy, onclick: () => { void send('approve'); } }, 'Approve')));
-      else actions.push(h('div', { class: 'callout warn', 'data-testid': 'terminal-only' }, p.cut ? 'This request is too long to show in full here, so it cannot be approved from your phone. Answer at the terminal.' : 'Your computer cannot take an answer for this one from here. Answer at the terminal.'));
-    } else if (p) {
+    const none = (what: string): HTMLElement => h('div', { class: 'callout warn', 'data-testid': 'terminal-only' }, h('b', {}, 'Answer on your computer. '), s.mode === 'bypass' ? 'This agent runs without approval prompts, so there is nothing to approve.' : `${who} cannot take ${what} from here. Botwarren only tells you that it is waiting.`);
+    if (p.kind === 'permission') {
+      if (p.can.approve || p.can.deny) {
+        actions.push(h('div', { class: 'row gap' }, h('button', { class: 'no-btn', 'data-testid': 'deny', disabled: busy, onclick: () => { void send('deny'); } }, 'Deny'), p.can.approve ? h('button', { class: 'ok-btn', 'data-testid': 'approve', disabled: busy, onclick: () => { void send('approve'); } }, 'Approve once') : null));
+        const say = (p.denyWith ?? []).map((id) => l.presets().find((pr) => pr.id === id)).filter((pr): pr is { id: string; label: string } => !!pr);
+        if (say.length) {
+          actions.push(h('p', { class: 'h3' }, 'Deny and say'));
+          actions.push(h('div', { class: 'row wrap gap' }, ...say.map((pr) => h('button', { class: 'ghost', 'data-testid': `deny-say-${pr.id}`, disabled: busy, onclick: () => { void send('reply', pr.id); } }, pr.label))));
+        }
+        actions.push(p.can.approve ? h('p', { class: 'fine' }, 'Approve means this one request only.') : h('div', { class: 'callout warn', 'data-testid': 'deny-only' }, h('b', {}, 'You can deny this from here. '), `To approve it, answer on your computer: ${who} does not take an approval from outside.`));
+      } else actions.push(p.cut ? h('div', { class: 'callout warn', 'data-testid': 'terminal-only' }, h('b', {}, 'Answer on your computer. '), 'This request is too long to show in full here, so it cannot be approved from your phone.') : none('an answer'));
+    } else {
       if (p.can.reply) {
         if (p.options?.length) { actions.push(h('p', { class: 'h3' }, 'Its options')); for (const o of p.options) actions.push(h('button', { class: 'nx', 'data-testid': `opt-${o.id}`, disabled: busy, onclick: () => { void send('reply', o.id); } }, o.label)); }
         actions.push(h('p', { class: 'h3' }, p.options?.length ? 'Or say' : 'Say'));
-        actions.push(h('div', { class: 'row wrap gap' }, ...(l.state?.presets ?? []).map((pr) => h('button', { class: 'ghost', 'data-testid': `preset-${pr.id}`, disabled: busy, onclick: () => { void send('reply', pr.id); } }, pr.label))));
-        actions.push(h('p', { class: 'fine' }, 'Replies come from a short list set on your computer. This page cannot send free text.'));
-      } else actions.push(h('div', { class: 'callout warn', 'data-testid': 'terminal-only' }, 'Your computer cannot take a reply from here. Answer at the terminal.'));
+        actions.push(h('div', { class: 'row wrap gap' }, ...l.presets().map((pr) => h('button', { class: 'ghost', 'data-testid': `preset-${pr.id}`, disabled: busy, onclick: () => { void send('reply', pr.id); } }, pr.label))));
+        if (u.canFreeText(cs)) actions.push(h('p', { class: 'h3' }, 'Or answer in your own words'), ...u.composeArea(cs, true));
+        else actions.push(h('p', { class: 'fine' }, 'Replies come from a short list set on your computer. This page cannot send free text here.'));
+      } else actions.push(none('a reply'));
     }
-    if (p) actions.push(h('p', { class: 'fine center' }, 'Your computer re-checks this and can ask you to confirm there.'));
-    return [bar, h('div', { class: 'col page' }, ...body, h('div', { class: 'pushdown col gap' }, ...actions))];
+    if (p.can.approve || p.can.reply || p.can.deny) actions.push(h('p', { class: 'fine center' }, 'Your computer re-checks this and can ask you to confirm there.'));
+    return [...body.filter((x): x is HTMLElement => x !== null), h('div', { class: 'pushdown col gap' }, ...actions)];
+  }
+
+  function startScreen(): HTMLElement[] {
+    const u = ui();
+    const close = (): void => { screen = { t: 'home' }; notice = { tone: 'good', text: 'Started. The new session appears in your list.' }; };
+    return [h('div', { class: 'topbar' }, h('button', { class: 'iconbtn', 'aria-label': 'Close', 'data-testid': 'start-close', onclick: () => go({ t: 'home' }) }, '✕'), h('span', { class: 'wm small' }, 'Start a session'), h('span', { class: 'spacer' })),
+      h('div', { class: 'col page' }, ...(u ? u.startView(close) : []))];
+  }
+
+  function auditScreen(): HTMLElement[] {
+    const u = ui();
+    return [h('div', { class: 'topbar' }, h('button', { class: 'iconbtn', 'aria-label': 'Back', onclick: () => go({ t: 'home' }) }, '‹'), h('span', { class: 'wm small' }, 'Activity'), h('span', { class: 'spacer' })),
+      h('div', { class: 'col page', 'data-testid': 'audit' }, ...(u ? u.auditView() : []))];
   }
 
   function devicesView(l: Link): HTMLElement[] {
@@ -298,6 +403,7 @@ export async function start(info: BuildInfo): Promise<void> {
       h('div', { class: 'col page' },
         ...devs.map((d) => h('div', { class: 'card col', 'data-testid': 'device' }, h('div', { class: 'row between' }, h('b', {}, d.name, d.id8 === l.id8 ? h('span', { class: 'tag' }, 'this phone') : null), h('span', { class: d.id8 === l.id8 ? 'pill live' : 'pill off' }, d.id8 === l.id8 ? 'Paired' : d.lastSeen ? `Seen ${ago(d.lastSeen)}` : 'Never seen')))),
         devs.length === 0 ? h('div', { class: 'card col' }, h('b', {}, l.name, h('span', { class: 'tag' }, 'this phone'))) : null,
+        ui()?.lockCard() ?? null,
         alertsCard(l),
         h('div', { class: 'callout' }, h('b', {}, 'Removing a device'), ' is done on your computer: ', h('span', { class: 'mono' }, 'botwarren-companion devices revoke'), '. Lost a phone? Do that first.'),
         h('div', { class: 'card col' }, h('span', { class: 'lbl' }, 'This page'), h('span', { class: 'mini', 'data-testid': 'build-detail' }, `build ${info.build} · version ${info.version} · signed with release key ${info.keyId} · verified at start`)),
@@ -308,22 +414,49 @@ export async function start(info: BuildInfo): Promise<void> {
     return [top(), h('div', { class: 'col page' }, h('h1', { class: 'title' }, 'Remote approvals are off for this phone'), h('div', { class: 'callout bad', 'data-testid': 'gone' }, why), h('button', { class: 'cta full', onclick: () => go({ t: 'pair', prefill: '' }) }, 'Pair again'))];
   }
 
-  let busy = false;
+  let uiFor: Link | null | undefined;
+  let uiCache: ControlUi | null = null;
+  /** the remote-control screens over the real link (or the test harness's scripted api) */
+  function ui(): ControlUi | null {
+    if (opts.api) { uiCache ??= new ControlUi(opts.api, render); return uiCache; }
+    if (!link) { uiCache = null; uiFor = null; return null; }
+    if (uiFor !== link || !uiCache) { uiFor = link; uiCache = new ControlUi(fromLink(link, opts.transport ?? createProtocol3Transport(link)), render); }
+    return uiCache;
+  }
+
+  /** a typing cursor must survive a redraw: the same text box, found again by its test id, gets focus and its selection back */
+  function keepFocus(): (() => void) {
+    const a = document.activeElement;
+    if (!(a instanceof HTMLTextAreaElement) || !root!.contains(a)) return () => undefined;
+    const id = a.getAttribute('data-testid'); const st = a.selectionStart; const en = a.selectionEnd; const top = a.scrollTop;
+    return () => {
+      const n = id ? root!.querySelector<HTMLTextAreaElement>(`textarea[data-testid="${id}"]`) : null;
+      if (n && !n.disabled && document.activeElement !== n) { n.focus({ preventScroll: true }); try { n.setSelectionRange(st, en); } catch { /* not selectable */ } n.scrollTop = top; }
+    };
+  }
+
   function render(): void {
     if (unsupported) { mount(root!, ...[top(), h('div', { class: 'col page' }, h('div', { class: 'callout bad' }, 'This browser is too old. It cannot keep keys safely. Use a current Chrome, Safari or Firefox.'))]); return; }
     if (link?.revoked && screen.t !== 'gone' && screen.t !== 'pair') { link = null; screen = { t: 'gone', why: 'This phone was removed, or remote approvals were switched off for your account.' }; }
-    resolveWant();
+    resolveWant(); resolveRef();
+    const restore = keepFocus();
+    const u = ui();
     let nodes: HTMLElement[];
     switch (screen.t) {
-      case 'pair': nodes = pairView(screen); break;
-      case 'sas': nodes = sasView(screen); break;
-      case 'home': nodes = link ? homeView(link) : pairView({ t: 'pair', prefill: '' }); break;
-      case 'card': nodes = link ? cardView(link, screen.sid) : []; break;
-      case 'devices': nodes = link ? devicesView(link) : []; break;
+      case 'pair': u?.syncWatch(null); nodes = pairView(screen); break;
+      case 'sas': u?.syncWatch(null); nodes = sasView(screen); break;
+      case 'home': nodes = u ? homeView(screen.sel ?? null) : pairView({ t: 'pair', prefill: '' }); break;
+      case 'card': nodes = u ? (wide() ? homeView(screen.sid) : cardView(screen.sid)) : []; break;
+      case 'devices': u?.syncWatch(null); nodes = link ? devicesView(link) : []; break;
       case 'gone': nodes = goneView(screen.why); break;
+      case 'audit': u?.syncWatch(null); nodes = auditScreen(); break;
+      case 'start': u?.syncWatch(null); nodes = startScreen(); break;
     }
-    mount(root!, ...nodes);
-    const waiting = link?.state?.sessions.filter((x) => x.pending).length ?? 0;
+    root!.classList.toggle('fixed', screen.t === 'card' && !wide() && !!u);
+    root!.classList.toggle('split', wide() && (screen.t === 'home' || screen.t === 'card') && !!u);
+    mount(root!, ...nodes, ...(u ? u.overlay() : []));
+    restore();
+    const waiting = u?.api.sessions().filter((x) => x.status === 'needs_you').length ?? 0;
     document.title = waiting ? `(${waiting}) Botwarren Link` : 'Botwarren Link';
     if (waiting === 0 && lastWaiting > 0) void clearShown(); // answered somewhere: the alert in the tray would only be stale
     lastWaiting = waiting;
@@ -335,7 +468,8 @@ export async function start(info: BuildInfo): Promise<void> {
   window.addEventListener('hashchange', () => {
     if (screen.t === 'pair') { screen = { t: 'pair', prefill: codeFromHash() }; render(); return; }
     const rid = ridFromHash();
-    if (rid) want(rid); else if (location.hash === '#/waiting') want(null);
+    const ref = OPEN_REF.exec(location.hash)?.[1];
+    if (ref) wantRobot(ref); else if (rid) want(rid); else if (location.hash === '#/waiting') want(null);
   });
   // a tap on an alert while this page is already open arrives from the service worker
   try {
@@ -345,8 +479,14 @@ export async function start(info: BuildInfo): Promise<void> {
     });
   } catch { /* no service worker support: alerts are not offered either */ }
   setInterval(() => { if (screen.t === 'home' || screen.t === 'devices') render(); }, 30_000);
+  // ages and "stale" verdicts on an open session are time-based
+  setInterval(() => { if (screen.t === 'card' || (screen.t === 'home' && wide())) render(); }, 10_000);
+  window.matchMedia?.('(min-width: 900px)').addEventListener?.('change', () => { render(); });
   if (link) attach(link);
+  else if (opts.api) opts.api.onChange(render);
+  if (opts.api && !opts.api.host().ready) { /* the harness sends its first state when it likes */ }
   render();
+  if (wantRef !== null) wantRobot(wantRef);
   if (wantRid !== null) want(wantRid);
   if (location.hash === '#/waiting') want(null);
 }

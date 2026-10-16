@@ -1,0 +1,20 @@
+{
+  "tool": "muse",
+  "version": "1.4.9",
+  "captured": "2026-10-15",
+  "source": "observed",
+  "how": "recorded in the lab (a real, logged-in Muse Code 1.4.9 TUI driven in a pty, real model, real hook delivery to our plugin); paths and ids replaced, nothing else changed",
+  "event": "Stop",
+  "input": {
+    "cwd": "/work/lab-repo",
+    "hook_event_name": "Stop",
+    "last_assistant_message": "It is not done: the command did not run. The first attempt failed with `bwrap: loopback: Failed RTM_NEWADDR: Operation not permitted`, and the escalated retry was denied, so `/work/lab-repo/marker-deny.txt` was not created by me.",
+    "model": "muse-wonder-1.0",
+    "model_provider": "meta",
+    "permission_mode": "default",
+    "session_id": "019a0000-0000-7000-8000-000000000002",
+    "stop_hook_active": false,
+    "transcript_path": null,
+    "turn_id": "019a0000-0000-7000-8000-0000000000b1"
+  }
+}
