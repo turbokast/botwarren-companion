@@ -4,7 +4,7 @@
  * whole path through the real host (scope, step-up fallback, bind, delivery, follow-up) with a simulated paired phone.
  */
 import { afterEach, describe, expect, it } from 'vitest';
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -123,6 +123,17 @@ describe('OpenCode control: free-text answer to a question (form)', () => {
     await r.a.poll();
     return { key, p: r.rec.pendings.filter((x) => x.kind === 'question').at(-1)! };
   };
+
+  it('a question in a folder whose name has ~ ! \' ( ) * is still seen (Windows short names like RUNNER~1, "site (copy)")', async () => {
+    const r = await rig();
+    const odd = join(r.root, "RUNNER~1 (copy) it's*!");
+    mkdirSync(odd);
+    r.oc.sessions.push({ id: SID, dir: odd });
+    r.oc.forms.push({ id: 'frm_aaaa11112222', sessionID: SID, title: 'Which branch?', dir: odd, fields: [{ key: 'branch', type: 'string' }] as never });
+    await r.a.poll();
+    expect(r.rec.pendings.some((x) => x.kind === 'question' && x.native?.id === 'frm_aaaa11112222')).toBe(true);
+    expect(r.oc.requests.some((q) => q.path === '/api/form' && q.query.includes('%7E') && q.query.includes('%28'))).toBe(true);
+  });
 
   it('a form that is exactly one free-text field is answerable: the reply body is {answer: {<key>: text}} for that form id', async () => {
     const r = await rig();

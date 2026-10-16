@@ -383,7 +383,7 @@ export class OpenCodeAdapter implements ControlAdapter {
     // pending permission requests and questions, per folder (OpenCode scopes both lists to a folder)
     const pending: Req[] = []; const asking = new Map<string, Form>();
     for (const dir of dirs) {
-      const q = dir ? `?location%5Bdirectory%5D=${encodeURIComponent(dir)}` : '';
+      const q = dir ? `?location%5Bdirectory%5D=${queryValue(dir)}` : '';
       const pr = await this.http('GET', `/api/permission/request${q}`);
       const items = isObj(parse(pr?.body ?? '')) && Array.isArray((parse(pr!.body) as { data?: unknown }).data) ? (parse(pr!.body) as { data: unknown[] }).data.filter(isObj) : [];
       for (const it of items) {
@@ -509,6 +509,9 @@ function sessionMode(permissions: unknown): 'normal' | 'bypass' | undefined {
 }
 
 /** a pending form from `GET /api/form`; `text` is set only for a form that is exactly one free-text field (a string field with no fixed options, or with `custom` allowed) */
+/** encodeURIComponent leaves ~ ! ' ( ) * as they are, and loopbackHttp refuses them in a path: a folder like C:\\Users\\RUNNER~1 or "site (copy)" would never be polled */
+const queryValue = (v: string): string => encodeURIComponent(v).replace(/[~!'()*]/g, (c) => '%' + c.charCodeAt(0).toString(16).toUpperCase());
+
 function formOf(f: Record<string, unknown>, dir: string): Form {
   const id = str(f.id); const sessionID = str(f.sessionID);
   const fields = Array.isArray(f.fields) ? f.fields.filter(isObj) : [];

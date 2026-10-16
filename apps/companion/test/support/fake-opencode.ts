@@ -6,6 +6,7 @@
  * (204, 409 `FormAlreadySettledError`, 404 `FormNotFoundError`, 400 `FormInvalidAnswerError`). Records every request it receives (headers included) so tests can audit the wire.
  */
 import { createServer, type Server } from 'node:http';
+import { isAbsolute } from 'node:path';
 
 export interface FakePerm { id: string; sessionID: string; action: string; resources: string[]; save?: string[]; metadata?: Record<string, unknown>; message?: string; dir: string }
 export interface FakeMessage { id: string; type: 'user' | 'assistant'; time: { created: number; completed?: number }; text?: string; content?: unknown[]; error?: unknown }
@@ -62,7 +63,7 @@ export async function fakeOpenCode(o: { password?: string | null; version?: stri
         const known = new Set(['id', 'agent', 'model', 'location', 'metadata', 'permissions']);
         if (Object.keys(b).some((k) => !known.has(k))) return send(res, 400, { _tag: 'InvalidRequestError', message: 'unexpected field' });
         const d = b.location?.directory ?? '';
-        if (!d.startsWith('/')) return send(res, 500);
+        if (!isAbsolute(d)) return send(res, 500); // the real server takes the platform's absolute paths (C:\... on Windows)
         me.created.push(body);
         const id = `ses_ebbce2b1d${(++seq).toString(36).padStart(4, '0')}fe1S0z5sMVLZs5VF`;
         const s: FakeSession = { id, dir: d, updated: Date.now(), ...(b.agent ? { agent: b.agent } : {}), ...(b.permissions ? { permissions: b.permissions } : {}) };
