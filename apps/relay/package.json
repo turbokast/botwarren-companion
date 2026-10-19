@@ -16,10 +16,10 @@
     "zod": "4.6.5"
   },
   "devDependencies": {
-    "@types/node": "22.18.12",
+    "@types/node": "26.6.5",
     "@types/ws": "8.18.1",
-    "typescript": "5.9.3",
-    "vitest": "4.1.11"
+    "typescript": "7.0.2",
+    "vitest": "5.0.4"
   },
   "homepage": "https://botwarren.com",
   "repository": {
