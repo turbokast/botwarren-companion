@@ -8,7 +8,7 @@
 #
 # The archive contains this file, the relay and protocol sources, the lockfile and client/ (the web client signed by the release key). The image builds
 # nothing from the network except the base image and the locked production dependencies. docs/RELAY.md lists the environment variables.
-FROM node:22.20.0-bookworm-slim AS build
+FROM node:26.11.1-bookworm-slim AS build
 WORKDIR /app
 RUN corepack enable && corepack prepare pnpm@11.5.2 --activate
 COPY package.json pnpm-lock.yaml pnpm-workspace.yaml tsconfig.base.json ./
@@ -18,7 +18,7 @@ RUN pnpm install --prod --frozen-lockfile --ignore-scripts --filter "@botwarren/
 COPY apps/companion/src apps/companion/src
 COPY apps/relay/src apps/relay/src
 
-FROM node:22.20.0-bookworm-slim
+FROM node:26.11.1-bookworm-slim
 ENV NODE_ENV=production PORT=8080 RELAY_CLIENT_DIR=/srv/client
 WORKDIR /srv
 COPY --from=build /app /srv
