@@ -24,11 +24,11 @@
   },
   "devDependencies": {
     "@modelcontextprotocol/sdk": "1.32.1",
-    "@types/node": "22.18.12",
-    "typescript": "5.9.3",
-    "vitest": "4.1.11",
-    "esbuild": "0.25.12",
-    "@playwright/test": "1.55.1"
+    "@types/node": "26.6.5",
+    "typescript": "7.0.2",
+    "vitest": "5.0.4",
+    "esbuild": "0.28.2",
+    "@playwright/test": "1.64.0"
   },
   "homepage": "https://botwarren.com",
   "repository": {
